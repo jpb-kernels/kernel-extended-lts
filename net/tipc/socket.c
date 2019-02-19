@@ -281,6 +281,88 @@ static bool tsk_peer_msg(struct tipc_sock *tsk, struct tipc_msg *msg)
 	return false;
 }
 
+/* tipc_set_sk_state - set the sk_state of the socket
+ * @sk: socket
+ *
+ * Caller must hold socket lock
+ *
+ * Returns 0 on success, errno otherwise
+ */
+static int tipc_set_sk_state(struct sock *sk, int state)
+{
+	int oldsk_state = sk->sk_state;
+	int res = -EINVAL;
+
+	switch (state) {
+	case TIPC_OPEN:
+		res = 0;
+		break;
+	case TIPC_LISTEN:
+	case TIPC_CONNECTING:
+		if (oldsk_state == TIPC_OPEN)
+			res = 0;
+		break;
+	case TIPC_ESTABLISHED:
+		if (oldsk_state == TIPC_CONNECTING ||
+		    oldsk_state == TIPC_OPEN)
+			res = 0;
+		break;
+	case TIPC_DISCONNECTING:
+		if (oldsk_state == TIPC_CONNECTING ||
+		    oldsk_state == TIPC_ESTABLISHED)
+			res = 0;
+		break;
+	}
+
+	if (!res)
+		sk->sk_state = state;
+
+	return res;
+}
+
+static int tipc_sk_sock_err(struct socket *sock, long *timeout)
+{
+	struct sock *sk = sock->sk;
+	int err = sock_error(sk);
+	int typ = sock->type;
+
+	if (err)
+		return err;
+	if (typ == SOCK_STREAM || typ == SOCK_SEQPACKET) {
+		if (sk->sk_state == TIPC_DISCONNECTING)
+			return -EPIPE;
+		else if (!tipc_sk_connected(sk))
+			return -ENOTCONN;
+	}
+	if (!*timeout)
+		return -EAGAIN;
+	if (signal_pending(current))
+		return sock_intr_errno(*timeout);
+
+	return 0;
+}
+
+#define tipc_wait_for_cond(sock_, timeo_, condition_)			       \
+({                                                                             \
+	struct sock *sk_;						       \
+	int rc_;							       \
+									       \
+	while ((rc_ = !(condition_))) {					       \
+		DEFINE_WAIT_FUNC(wait_, woken_wake_function);	               \
+		sk_ = (sock_)->sk;					       \
+		rc_ = tipc_sk_sock_err((sock_), timeo_);		       \
+		if (rc_)						       \
+			break;						       \
+		add_wait_queue(sk_sleep(sk_), &wait_);                         \
+		release_sock(sk_);					       \
+		*(timeo_) = wait_woken(&wait_, TASK_INTERRUPTIBLE, *(timeo_)); \
+		sched_annotate_sleep();				               \
+		lock_sock(sk_);						       \
+		remove_wait_queue(sk_sleep(sk_), &wait_);		       \
+	}								       \
+	rc_;								       \
+})
+
 /**
  * tipc_sk_create - create a TIPC socket
  * @net: network namespace (must be default network)
