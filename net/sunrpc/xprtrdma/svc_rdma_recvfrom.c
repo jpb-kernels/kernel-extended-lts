@@ -347,8 +347,17 @@ static void svc_rdma_wc_receive(struct ib_cq *cq, struct ib_wc *wc)
 	if (wc->status != IB_WC_SUCCESS)
 		goto flushed;
 
-	if (svc_rdma_post_recv(rdma))
-		goto post_err;
+	/* If receive posting fails, the connection is about to be
+	 * lost anyway. The server will not be able to send a reply
+	 * for this RPC, and the client will retransmit this RPC
+	 * anyway when it reconnects.
+	 *
+	 * Therefore we drop the Receive, even if status was SUCCESS
+	 * to reduce the likelihood of replayed requests once the
+	 * client reconnects.
+	 */
+	if (!svc_rdma_refresh_recvs(rdma, 1, false))
+		goto flushed;
 
 	/* All wc fields are now known to be valid */
 	ctxt->rc_byte_len = wc->byte_len;
@@ -366,7 +375,6 @@ static void svc_rdma_wc_receive(struct ib_cq *cq, struct ib_wc *wc)
 	goto out;
 
 flushed:
-post_err:
 	svc_rdma_recv_ctxt_put(rdma, ctxt);
 	set_bit(XPT_CLOSE, &rdma->sc_xprt.xpt_flags);
 	svc_xprt_enqueue(&rdma->sc_xprt);
