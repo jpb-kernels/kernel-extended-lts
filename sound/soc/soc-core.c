@@ -978,6 +978,68 @@ _err_defer:
 	return -EPROBE_DEFER;
 }
 
+/**
+ * snd_soc_runtime_set_dai_fmt() - Change DAI link format for a ASoC runtime
+ * @rtd: The runtime for which the DAI link format should be changed
+ * @dai_fmt: The new DAI link format
+ *
+ * This function updates the DAI link format for all DAIs connected to the DAI
+ * link for the specified runtime.
+ *
+ * Note: For setups with a static format set the dai_fmt field in the
+ * corresponding snd_dai_link struct instead of using this function.
+ *
+ * Returns 0 on success, otherwise a negative error code.
+ */
+int snd_soc_runtime_set_dai_fmt(struct snd_soc_pcm_runtime *rtd,
+				unsigned int dai_fmt)
+{
+	struct snd_soc_dai *cpu_dai;
+	struct snd_soc_dai *codec_dai;
+	unsigned int inv_dai_fmt;
+	unsigned int i;
+	int ret;
+
+	for_each_rtd_codec_dais(rtd, i, codec_dai) {
+		ret = snd_soc_dai_set_fmt(codec_dai, dai_fmt);
+		if (ret != 0 && ret != -ENOTSUPP)
+			return ret;
+	}
+
+	/*
+	 * Flip the polarity for the "CPU" end of a CODEC<->CODEC link
+	 * the component which has non_legacy_dai_naming is Codec
+	 */
+	inv_dai_fmt = dai_fmt & ~SND_SOC_DAIFMT_MASTER_MASK;
+	switch (dai_fmt & SND_SOC_DAIFMT_MASTER_MASK) {
+	case SND_SOC_DAIFMT_CBM_CFM:
+		inv_dai_fmt |= SND_SOC_DAIFMT_CBS_CFS;
+		break;
+	case SND_SOC_DAIFMT_CBM_CFS:
+		inv_dai_fmt |= SND_SOC_DAIFMT_CBS_CFM;
+		break;
+	case SND_SOC_DAIFMT_CBS_CFM:
+		inv_dai_fmt |= SND_SOC_DAIFMT_CBM_CFS;
+		break;
+	case SND_SOC_DAIFMT_CBS_CFS:
+		inv_dai_fmt |= SND_SOC_DAIFMT_CBM_CFM;
+		break;
+	}
+	for_each_rtd_cpu_dais(rtd, i, cpu_dai) {
+		unsigned int fmt = dai_fmt;
+
+		if (cpu_dai->component->driver->non_legacy_dai_naming)
+			fmt = inv_dai_fmt;
+
+		ret = snd_soc_dai_set_fmt(cpu_dai, fmt);
+		if (ret != 0 && ret != -ENOTSUPP)
+			return ret;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_soc_runtime_set_dai_fmt);
+
 static void soc_set_of_name_prefix(struct snd_soc_component *component)
 {
 	struct device_node *of_node = soc_component_to_node(component);
@@ -1715,69 +1777,6 @@ static void soc_remove_aux_devices(struct snd_soc_card *card)
 		}
 	}
 }
-
-/**
- * snd_soc_runtime_set_dai_fmt() - Change DAI link format for a ASoC runtime
- * @rtd: The runtime for which the DAI link format should be changed
- * @dai_fmt: The new DAI link format
- *
- * This function updates the DAI link format for all DAIs connected to the DAI
- * link for the specified runtime.
- *
- * Note: For setups with a static format set the dai_fmt field in the
- * corresponding snd_dai_link struct instead of using this function.
- *
- * Returns 0 on success, otherwise a negative error code.
- */
-int snd_soc_runtime_set_dai_fmt(struct snd_soc_pcm_runtime *rtd,
-	unsigned int dai_fmt)
-{
-	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
-	struct snd_soc_dai *codec_dai;
-	unsigned int i;
-	int ret;
-
-	for_each_rtd_codec_dai(rtd, i, codec_dai) {
-		ret = snd_soc_dai_set_fmt(codec_dai, dai_fmt);
-		if (ret != 0 && ret != -ENOTSUPP)
-			return ret;
-	}
-
-	/*
-	 * Flip the polarity for the "CPU" end of a CODEC<->CODEC link
-	 * the component which has non_legacy_dai_naming is Codec
-	 */
-	if (cpu_dai->component->driver->non_legacy_dai_naming) {
-		unsigned int inv_dai_fmt;
-
-		inv_dai_fmt = dai_fmt & ~SND_SOC_DAIFMT_MASTER_MASK;
-		switch (dai_fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-		case SND_SOC_DAIFMT_CBM_CFM:
-			inv_dai_fmt |= SND_SOC_DAIFMT_CBS_CFS;
-			break;
-		case SND_SOC_DAIFMT_CBM_CFS:
-			inv_dai_fmt |= SND_SOC_DAIFMT_CBS_CFM;
-			break;
-		case SND_SOC_DAIFMT_CBS_CFM:
-			inv_dai_fmt |= SND_SOC_DAIFMT_CBM_CFS;
-			break;
-		case SND_SOC_DAIFMT_CBS_CFS:
-			inv_dai_fmt |= SND_SOC_DAIFMT_CBM_CFM;
-			break;
-		}
-
-		dai_fmt = inv_dai_fmt;
-	}
-
-	ret = snd_soc_dai_set_fmt(cpu_dai, dai_fmt);
-	if (ret != 0 && ret != -ENOTSUPP)
-
-		return ret;
-	}
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(snd_soc_runtime_set_dai_fmt);
 
 #ifdef CONFIG_DMI
 /*
