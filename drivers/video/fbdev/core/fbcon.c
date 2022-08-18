@@ -2413,7 +2413,7 @@ static int fbcon_do_set_font(struct vc_data *vc, int w, int h,
 	struct fb_info *info = registered_fb[con2fb_map[vc->vc_num]];
 	struct fbcon_ops *ops = info->fbcon_par;
 	struct fbcon_display *p = &fb_display[vc->vc_num];
-	int resize;
+	int resize, ret, old_userfont, old_width, old_height, old_charcount;
 	int cnt;
 	char *old_data = NULL;
 
@@ -2425,8 +2425,14 @@ static int fbcon_do_set_font(struct vc_data *vc, int w, int h,
 	else
 		cnt = 256;
 	vc->vc_font.data = (void *)(p->fontdata = data);
+	old_userfont = p->userfont;
 	if ((p->userfont = userfont))
 		REFCOUNT(data)++;
+
+	old_width = vc->vc_font.width;
+	old_height = vc->vc_font.height;
+	old_charcount = vc->vc_font.charcount;
+
 	vc->vc_font.width = w;
 	vc->vc_font.height = h;
 	if (vc->vc_hi_font_mask && cnt == 256)
@@ -2441,7 +2447,9 @@ static int fbcon_do_set_font(struct vc_data *vc, int w, int h,
 		rows = FBCON_SWAP(ops->rotate, info->var.yres, info->var.xres);
 		cols /= w;
 		rows /= h;
-		vc_resize(vc, cols, rows);
+		ret = vc_resize(vc, cols, rows);
+		if (ret)
+			goto err_out;
 	} else if (con_is_visible(vc)
 		   && vc->vc_mode == KD_TEXT) {
 		fbcon_clear_margins(vc, 0);
@@ -2451,6 +2459,30 @@ static int fbcon_do_set_font(struct vc_data *vc, int w, int h,
 	if (old_data && (--REFCOUNT(old_data) == 0))
 		kfree(old_data - FONT_EXTRA_WORDS * sizeof(int));
 	return 0;
+err_out:
+	p->fontdata = old_data;
+	vc->vc_font.data = (void *)old_data;
+
+	if (userfont) {
+		p->userfont = old_userfont;
+		REFCOUNT(data)--;
+	}
+
+	vc->vc_font.width = old_width;
+	vc->vc_font.height = old_height;
+	vc->vc_font.charcount = old_charcount;
+
+	return ret;
+}
+
+static int fbcon_copy_font(struct vc_data *vc, int con)
+{
+	struct fbcon_display *od = &fb_display[con];
+	struct console_font *f = &vc->vc_font;
+
+	if (od->fontdata == f->data)
+		return 0;	/* already the same font... */
+	return fbcon_do_set_font(vc, f->width, f->height, od->fontdata, od->userfont);
 }
 
 static int fbcon_copy_font(struct vc_data *vc, int con)
