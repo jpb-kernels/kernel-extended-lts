@@ -246,7 +246,22 @@ static inline __be16 udp_flow_src_port(struct net *net, struct sk_buff *skb,
 }
 
 /* net/ipv4/udp.c */
-void udp_v4_early_demux(struct sk_buff *skb);
+void udp_destruct_common(struct sock *sk);
+void skb_consume_udp(struct sock *sk, struct sk_buff *skb, int len);
+int __udp_enqueue_schedule_skb(struct sock *sk, struct sk_buff *skb);
+void udp_skb_destructor(struct sock *sk, struct sk_buff *skb);
+struct sk_buff *__skb_recv_udp(struct sock *sk, unsigned int flags,
+			       int noblock, int *peeked, int *off, int *err);
+static inline struct sk_buff *skb_recv_udp(struct sock *sk, unsigned int flags,
+					   int noblock, int *err)
+{
+	int peeked, off = 0;
+
+	return __skb_recv_udp(sk, flags, noblock, &peeked, &off, err);
+}
+
+int udp_v4_early_demux(struct sk_buff *skb);
+bool udp_sk_rx_dst_set(struct sock *sk, struct dst_entry *dst);
 int udp_get_port(struct sock *sk, unsigned short snum,
 		 int (*saddr_cmp)(const struct sock *,
 				  const struct sock *));
