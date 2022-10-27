@@ -2216,6 +2216,9 @@ static void soc_cleanup_card_resources(struct snd_soc_card *card)
 	/* flush delayed work before removing DAIs and DAPM widgets */
 	snd_soc_flush_all_delayed_work(card);
 
+	/* release machine specific resources */
+	for_each_card_rtds(card, rtd)
+		snd_soc_link_exit(rtd);
 	/* remove and free each DAI */
 	soc_remove_dai_links(card);
 	soc_remove_pcm_runtimes(card);
