@@ -881,16 +881,10 @@ struct snd_soc_dai_link *snd_soc_find_dai_link(struct snd_soc_card *card,
 
 	lockdep_assert_held(&client_mutex);
 
-	for_each_card_links(card, link) {
-		if (link->id != id)
-			continue;
-
-		if (name && (!link->name || strcmp(name, link->name)))
-			continue;
-
-		if (stream_name && (!link->stream_name
-			|| strcmp(stream_name, link->stream_name)))
-			continue;
+	/*
+	 * Notify the machine driver for extra destruction
+	 */
+	snd_soc_card_remove_dai_link(card, rtd->dai_link);
 
 		return link;
 	}
@@ -2196,6 +2190,9 @@ static void soc_cleanup_card_resources(struct snd_soc_card *card)
 		card->snd_card = NULL;
 	}
 
+	/* release machine specific resources */
+	for_each_card_rtds(card, rtd)
+		snd_soc_link_exit(rtd);
 	/* remove and free each DAI */
 	soc_remove_dai_links(card);
 	soc_remove_pcm_runtimes(card);
