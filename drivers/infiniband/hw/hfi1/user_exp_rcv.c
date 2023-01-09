@@ -370,6 +370,8 @@ int hfi1_user_exp_rcv_setup(struct file *fp, struct hfi1_tid_info *tinfo)
 	npages = num_user_pages(vaddr, tinfo->length);
 	if (!npages)
 		return -EINVAL;
+	if (tinfo->length == 0)
+		return -EINVAL;
 
 	if (npages > uctxt->expected_count) {
 		dd_dev_err(dd, "Expected buffer too big\n");
