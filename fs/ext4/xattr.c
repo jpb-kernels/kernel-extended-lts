@@ -283,6 +283,219 @@ ext4_xattr_find_entry(struct ext4_xattr_entry **pentry, int name_index,
 	return cmp ? -ENODATA : 0;
 }
 
+static u32
+ext4_xattr_inode_hash(struct ext4_sb_info *sbi, const void *buffer, size_t size)
+{
+	return ext4_chksum(sbi, sbi->s_csum_seed, buffer, size);
+}
+
+static u64 ext4_xattr_inode_get_ref(struct inode *ea_inode)
+{
+	return ((u64)ea_inode->i_ctime.tv_sec << 32) |
+	       ((u32)ea_inode->i_version);
+}
+
+static void ext4_xattr_inode_set_ref(struct inode *ea_inode, u64 ref_count)
+{
+	ea_inode->i_ctime.tv_sec = (u32)(ref_count >> 32);
+	ea_inode->i_version = (u32)ref_count;
+}
+
+static u32 ext4_xattr_inode_get_hash(struct inode *ea_inode)
+{
+	return (u32)ea_inode->i_atime.tv_sec;
+}
+
+static void ext4_xattr_inode_set_hash(struct inode *ea_inode, u32 hash)
+{
+	ea_inode->i_atime.tv_sec = hash;
+}
+
+/*
+ * Read the EA value from an inode.
+ */
+static int ext4_xattr_inode_read(struct inode *ea_inode, void *buf, size_t size)
+{
+	int blocksize = 1 << ea_inode->i_blkbits;
+	int bh_count = (size + blocksize - 1) >> ea_inode->i_blkbits;
+	int tail_size = (size % blocksize) ?: blocksize;
+	struct buffer_head *bhs_inline[8];
+	struct buffer_head **bhs = bhs_inline;
+	int i, ret;
+
+	if (bh_count > ARRAY_SIZE(bhs_inline)) {
+		bhs = kmalloc_array(bh_count, sizeof(*bhs), GFP_NOFS);
+		if (!bhs)
+			return -ENOMEM;
+	}
+
+	ret = ext4_bread_batch(ea_inode, 0 /* block */, bh_count,
+			       true /* wait */, bhs);
+	if (ret)
+		goto free_bhs;
+
+	for (i = 0; i < bh_count; i++) {
+		/* There shouldn't be any holes in ea_inode. */
+		if (!bhs[i]) {
+			ret = -EFSCORRUPTED;
+			goto put_bhs;
+		}
+		memcpy((char *)buf + blocksize * i, bhs[i]->b_data,
+		       i < bh_count - 1 ? blocksize : tail_size);
+	}
+	ret = 0;
+put_bhs:
+	for (i = 0; i < bh_count; i++)
+		brelse(bhs[i]);
+free_bhs:
+	if (bhs != bhs_inline)
+		kfree(bhs);
+	return ret;
+}
+
+#define EXT4_XATTR_INODE_GET_PARENT(inode) ((__u32)(inode)->i_mtime.tv_sec)
+
+static int ext4_xattr_inode_iget(struct inode *parent, unsigned long ea_ino,
+				 u32 ea_inode_hash, struct inode **ea_inode)
+{
+	struct inode *inode;
+	int err;
+
+	/*
+	 * We have to check for this corruption early as otherwise
+	 * iget_locked() could wait indefinitely for the state of our
+	 * parent inode.
+	 */
+	if (parent->i_ino == ea_ino) {
+		ext4_error(parent->i_sb,
+			   "Parent and EA inode have the same ino %lu", ea_ino);
+		return -EFSCORRUPTED;
+	}
+
+	inode = ext4_iget(parent->i_sb, ea_ino, EXT4_IGET_NORMAL);
+	if (IS_ERR(inode)) {
+		err = PTR_ERR(inode);
+		ext4_error(parent->i_sb,
+			   "error while reading EA inode %lu err=%d", ea_ino,
+			   err);
+		return err;
+	}
+
+	if (is_bad_inode(inode)) {
+		ext4_error(parent->i_sb,
+			   "error while reading EA inode %lu is_bad_inode",
+			   ea_ino);
+		err = -EIO;
+		goto error;
+	}
+
+	if (!(EXT4_I(inode)->i_flags & EXT4_EA_INODE_FL)) {
+		ext4_error(parent->i_sb,
+			   "EA inode %lu does not have EXT4_EA_INODE_FL flag",
+			    ea_ino);
+		err = -EINVAL;
+		goto error;
+	}
+
+	ext4_xattr_inode_set_class(inode);
+
+	/*
+	 * Check whether this is an old Lustre-style xattr inode. Lustre
+	 * implementation does not have hash validation, rather it has a
+	 * backpointer from ea_inode to the parent inode.
+	 */
+	if (ea_inode_hash != ext4_xattr_inode_get_hash(inode) &&
+	    EXT4_XATTR_INODE_GET_PARENT(inode) == parent->i_ino &&
+	    inode->i_generation == parent->i_generation) {
+		ext4_set_inode_state(inode, EXT4_STATE_LUSTRE_EA_INODE);
+		ext4_xattr_inode_set_ref(inode, 1);
+	} else {
+		inode_lock(inode);
+		inode->i_flags |= S_NOQUOTA;
+		inode_unlock(inode);
+	}
+
+	*ea_inode = inode;
+	return 0;
+error:
+	iput(inode);
+	return err;
+}
+
+static int
+ext4_xattr_inode_verify_hashes(struct inode *ea_inode,
+			       struct ext4_xattr_entry *entry, void *buffer,
+			       size_t size)
+{
+	u32 hash;
+
+	/* Verify stored hash matches calculated hash. */
+	hash = ext4_xattr_inode_hash(EXT4_SB(ea_inode->i_sb), buffer, size);
+	if (hash != ext4_xattr_inode_get_hash(ea_inode))
+		return -EFSCORRUPTED;
+
+	if (entry) {
+		__le32 e_hash, tmp_data;
+
+		/* Verify entry hash. */
+		tmp_data = cpu_to_le32(hash);
+		e_hash = ext4_xattr_hash_entry(entry->e_name, entry->e_name_len,
+					       &tmp_data, 1);
+		if (e_hash != entry->e_hash)
+			return -EFSCORRUPTED;
+	}
+	return 0;
+}
+
+/*
+ * Read xattr value from the EA inode.
+ */
+static int
+ext4_xattr_inode_get(struct inode *inode, struct ext4_xattr_entry *entry,
+		     void *buffer, size_t size)
+{
+	struct mb_cache *ea_inode_cache = EA_INODE_CACHE(inode);
+	struct inode *ea_inode;
+	int err;
+
+	err = ext4_xattr_inode_iget(inode, le32_to_cpu(entry->e_value_inum),
+				    le32_to_cpu(entry->e_hash), &ea_inode);
+	if (err) {
+		ea_inode = NULL;
+		goto out;
+	}
+
+	if (i_size_read(ea_inode) != size) {
+		ext4_warning_inode(ea_inode,
+				   "ea_inode file size=%llu entry size=%zu",
+				   i_size_read(ea_inode), size);
+		err = -EFSCORRUPTED;
+		goto out;
+	}
+
+	err = ext4_xattr_inode_read(ea_inode, buffer, size);
+	if (err)
+		goto out;
+
+	if (!ext4_test_inode_state(ea_inode, EXT4_STATE_LUSTRE_EA_INODE)) {
+		err = ext4_xattr_inode_verify_hashes(ea_inode, entry, buffer,
+						     size);
+		if (err) {
+			ext4_warning_inode(ea_inode,
+					   "EA inode hash validation failed");
+			goto out;
+		}
+
+		if (ea_inode_cache)
+			mb_cache_entry_create(ea_inode_cache, GFP_NOFS,
+					ext4_xattr_inode_get_hash(ea_inode),
+					ea_inode->i_ino, true /* reusable */);
+	}
+out:
+	iput(ea_inode);
+	return err;
+}
+
 static int
 ext4_xattr_block_get(struct inode *inode, int name_index, const char *name,
 		     void *buffer, size_t buffer_size)
