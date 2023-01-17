@@ -391,26 +391,10 @@ void load_ucode_amd_ap(void)
 	if (!eq_id)
 		return;
 
-	if (eq_id == this_equiv_id) {
-		mc = (struct microcode_amd *)amd_ucode_patch;
-
-		if (mc && rev < mc->hdr.patch_id) {
-			if (!__apply_microcode_amd(mc))
-				ucode_new_rev = mc->hdr.patch_id;
-		}
-
-	} else {
-		if (!ucode_cpio.data)
-			return;
-
-		/*
-		 * AP has a different equivalence ID than BSP, looks like
-		 * mixed-steppings silicon so go through the ucode blob anew.
-		 */
-		apply_ucode_in_initrd(ucode_cpio.data, ucode_cpio.size, false);
-	}
+	apply_microcode_early_amd(cpuid_1_eax, cp.data, cp.size, false);
 }
-#endif
+
+static enum ucode_state load_microcode_amd(u8 family, const u8 *data, size_t size);
 
 int __init save_microcode_in_initrd_amd(void)
 {
@@ -454,18 +438,11 @@ int __init save_microcode_in_initrd_amd(void)
 	eax   = cpuid_eax(0x00000001);
 	eax   = ((eax >> 8) & 0xf) + ((eax >> 20) & 0xff);
 
-	ret = load_microcode_amd(true, eax, container, container_size);
-	if (ret != UCODE_OK)
-		retval = -EINVAL;
+	ret = load_microcode_amd(x86_family(cpuid_1_eax), desc.data, desc.size);
+	if (ret > UCODE_UPDATED)
+		return -EINVAL;
 
-	/*
-	 * This will be freed any msec now, stash patches for the current
-	 * family and switch to patch cache for cpu hotplug, etc later.
-	 */
-	container = NULL;
-	container_size = 0;
-
-	return retval;
+	return 0;
 }
 
 void reload_ucode_amd(void)
@@ -871,8 +848,7 @@ static enum ucode_state __load_microcode_amd(u8 family, const u8 *data,
 	return UCODE_OK;
 }
 
-static enum ucode_state
-load_microcode_amd(bool save, u8 family, const u8 *data, size_t size)
+static enum ucode_state load_microcode_amd(u8 family, const u8 *data, size_t size)
 {
 	enum ucode_state ret;
 
@@ -883,18 +859,22 @@ load_microcode_amd(bool save, u8 family, const u8 *data, size_t size)
 
 	if (ret != UCODE_OK)
 		cleanup();
-
-#ifdef CONFIG_X86_32
-	/* save BSP's matching patch for early load */
-	if (save) {
-		struct ucode_patch *p = find_patch(0);
-		if (p) {
-			memset(amd_ucode_patch, 0, PATCH_MAX_SIZE);
-			memcpy(amd_ucode_patch, p->data, min_t(u32, ksize(p->data),
-							       PATCH_MAX_SIZE));
-		}
+		return ret;
 	}
-#endif
+
+	p = find_patch(0);
+	if (!p) {
+		return ret;
+	} else {
+		if (boot_cpu_data.microcode >= p->patch_id)
+			return ret;
+
+		ret = UCODE_NEW;
+	}
+
+	memset(amd_ucode_patch, 0, PATCH_MAX_SIZE);
+	memcpy(amd_ucode_patch, p->data, min_t(u32, ksize(p->data), PATCH_MAX_SIZE));
+
 	return ret;
 }
 
@@ -919,12 +899,11 @@ static enum ucode_state request_microcode_amd(int cpu, struct device *device,
 {
 	char fw_name[36] = "amd-ucode/microcode_amd.bin";
 	struct cpuinfo_x86 *c = &cpu_data(cpu);
-	bool bsp = c->cpu_index == boot_cpu_data.cpu_index;
 	enum ucode_state ret = UCODE_NFOUND;
 	const struct firmware *fw;
 
 	/* reload ucode container only on the boot cpu */
-	if (!refresh_fw || !bsp)
+	if (!refresh_fw)
 		return UCODE_OK;
 
 	if (c->x86 >= 0x15)
@@ -941,7 +920,7 @@ static enum ucode_state request_microcode_amd(int cpu, struct device *device,
 		goto fw_release;
 	}
 
-	ret = load_microcode_amd(bsp, c->x86, fw->data, fw->size);
+	ret = load_microcode_amd(c->x86, fw->data, fw->size);
 
  fw_release:
 	release_firmware(fw);
