@@ -57,17 +57,9 @@ static size_t container_size;
 static bool ucode_builtin;
 
 static u32 ucode_new_rev;
-static u8 amd_ucode_patch[PATCH_MAX_SIZE];
-static u16 this_equiv_id;
 
-static struct cpio_data ucode_cpio;
-
-static struct cpio_data __init find_ucode_in_initrd(void)
-{
-#ifdef CONFIG_BLK_DEV_INITRD
-	char *path;
-	void *start;
-	size_t size;
+/* One blob per node. */
+static u8 amd_ucode_patch[MAX_NUMNODES][PATCH_MAX_SIZE];
 
 	/*
 	 * Microcode patch container file is prepended to the initrd in cpio
@@ -166,9 +158,7 @@ static void apply_ucode_in_initrd(void *ucode, size_t size, bool save_patch)
 	patch	= (u8 (*)[PATCH_MAX_SIZE])__pa_nodebug(&amd_ucode_patch);
 #else
 	new_rev = &ucode_new_rev;
-	cont_sz = &container_size;
-	cont	= &container;
-	patch	= &amd_ucode_patch;
+	patch	= &amd_ucode_patch[0];
 #endif
 
 	data   = ucode;
@@ -447,17 +437,10 @@ int __init save_microcode_in_initrd_amd(void)
 
 void reload_ucode_amd(unsigned int cpu)
 {
+	u32 rev, dummy;
 	struct microcode_amd *mc;
-	u32 rev;
 
-	/*
-	 * early==false because this is a syscore ->resume path and by
-	 * that time paging is long enabled.
-	 */
-	if (check_current_patch_level(&rev, false))
-		return;
-
-	mc = (struct microcode_amd *)amd_ucode_patch;
+	mc = (struct microcode_amd *)amd_ucode_patch[cpu_to_node(cpu)];
 
 	if (mc && rev < mc->hdr.patch_id) {
 		if (!__apply_microcode_amd(mc)) {
@@ -850,6 +833,9 @@ static enum ucode_state __load_microcode_amd(u8 family, const u8 *data,
 
 static enum ucode_state load_microcode_amd(u8 family, const u8 *data, size_t size)
 {
+	struct cpuinfo_x86 *c;
+	unsigned int nid, cpu;
+	struct ucode_patch *p;
 	enum ucode_state ret;
 
 	/* free old equiv table */
@@ -862,18 +848,22 @@ static enum ucode_state load_microcode_amd(u8 family, const u8 *data, size_t siz
 		return ret;
 	}
 
-	p = find_patch(0);
-	if (!p) {
-		return ret;
-	} else {
-		if (boot_cpu_data.microcode >= p->patch_id)
-			return ret;
+	for_each_node(nid) {
+		cpu = cpumask_first(cpumask_of_node(nid));
+		c = &cpu_data(cpu);
+
+		p = find_patch(cpu);
+		if (!p)
+			continue;
+
+		if (c->microcode >= p->patch_id)
+			continue;
 
 		ret = UCODE_NEW;
-	}
 
-	memset(amd_ucode_patch, 0, PATCH_MAX_SIZE);
-	memcpy(amd_ucode_patch, p->data, min_t(u32, ksize(p->data), PATCH_MAX_SIZE));
+		memset(&amd_ucode_patch[nid], 0, PATCH_MAX_SIZE);
+		memcpy(&amd_ucode_patch[nid], p->data, min_t(u32, ksize(p->data), PATCH_MAX_SIZE));
+	}
 
 	return ret;
 }
