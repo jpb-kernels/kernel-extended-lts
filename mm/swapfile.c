@@ -685,7 +685,9 @@ start_over:
 		if (offset)
 			return swp_entry(si->type, offset);
 		pr_debug("scan_swap_map of si %d failed to find offset\n",
-		       si->type);
+			si->type);
+		cond_resched();
+
 		spin_lock(&swap_avail_lock);
 nextsi:
 		/*
