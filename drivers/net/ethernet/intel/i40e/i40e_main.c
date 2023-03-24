@@ -9554,6 +9554,7 @@ static int i40e_add_vsi(struct i40e_vsi *vsi)
 		f_count++;
 	}
 	spin_unlock_bh(&vsi->mac_filter_list_lock);
+	clear_bit(__I40E_VSI_OVERFLOW_PROMISC, vsi->state);
 
 	if (f_count) {
 		vsi->flags |= I40E_VSI_FLAG_FILTER_CHANGED;
