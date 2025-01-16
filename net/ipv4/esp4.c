@@ -147,7 +147,11 @@ static void esp_output_done(struct crypto_async_request *base, int err)
 		secpath_reset(skb);
 		xfrm_dev_resume(skb);
 	} else {
-		xfrm_output_resume(skb, err);
+		if (!err &&
+		    x->encap && x->encap->encap_type == TCP_ENCAP_ESPINTCP)
+			esp_output_tail_tcp(x, skb);
+		else
+			xfrm_output_resume(skb_to_full_sk(skb), skb, err);
 	}
 }
 
