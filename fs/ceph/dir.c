@@ -319,7 +319,7 @@ static int ceph_readdir(struct file *file, struct dir_context *ctx)
 	/* always start with . and .. */
 	if (ctx->pos == 0) {
 		dout("readdir off 0 -> '.'\n");
-		if (!dir_emit(ctx, ".", 1, 
+		if (!dir_emit(ctx, ".", 1,
 			    ceph_translate_ino(inode->i_sb, inode->i_ino),
 			    inode->i_mode >> 12))
 			return 0;
@@ -1048,6 +1048,7 @@ static int ceph_unlink(struct inode *dir, struct dentry *dentry)
 	struct ceph_fs_client *fsc = ceph_sb_to_client(dir->i_sb);
 	struct ceph_mds_client *mdsc = fsc->mdsc;
 	struct inode *inode = d_inode(dentry);
+	struct ceph_inode_info *ci = ceph_inode(inode);
 	struct ceph_mds_request *req;
 	int err = -EROFS;
 	int op;
@@ -1075,9 +1076,36 @@ static int ceph_unlink(struct inode *dir, struct dentry *dentry)
 	req->r_dentry_drop = CEPH_CAP_FILE_SHARED;
 	req->r_dentry_unless = CEPH_CAP_FILE_EXCL;
 	req->r_inode_drop = ceph_drop_caps_for_unlink(inode);
-	err = ceph_mdsc_do_request(mdsc, dir, req);
-	if (!err && !req->r_reply_info.head->is_dentry)
-		d_delete(dentry);
+
+	if (try_async && op == CEPH_MDS_OP_UNLINK &&
+	    (req->r_dir_caps = get_caps_for_async_unlink(dir, dentry))) {
+		dout("async unlink on %llu/%.*s caps=%s", ceph_ino(dir),
+		     dentry->d_name.len, dentry->d_name.name,
+		     ceph_cap_string(req->r_dir_caps));
+		set_bit(CEPH_MDS_R_ASYNC, &req->r_req_flags);
+		req->r_callback = ceph_async_unlink_cb;
+		req->r_old_inode = d_inode(dentry);
+		ihold(req->r_old_inode);
+		err = ceph_mdsc_submit_request(mdsc, dir, req);
+		if (!err) {
+			/*
+			 * We have enough caps, so we assume that the unlink
+			 * will succeed. Fix up the target inode and dcache.
+			 */
+			drop_nlink(inode);
+			d_delete(dentry);
+		} else if (err == -EJUKEBOX) {
+			try_async = false;
+			ceph_mdsc_put_request(req);
+			goto retry;
+		}
+	} else {
+		set_bit(CEPH_MDS_R_PARENT_LOCKED, &req->r_req_flags);
+		err = ceph_mdsc_do_request(mdsc, dir, req);
+		if (!err && !req->r_reply_info.head->is_dentry)
+			d_delete(dentry);
+	}
+
 	ceph_mdsc_put_request(req);
 out:
 	return err;
