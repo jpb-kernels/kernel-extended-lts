@@ -810,8 +810,13 @@ static int intel_th_output_open(struct inode *inode, struct file *file)
 	int err;
 
 	dev = bus_find_device_by_devt(&intel_th_bus, inode->i_rdev);
-	if (!dev || !dev->driver)
+	if (!dev)
 		return -ENODEV;
+
+	if (!dev->driver) {
+		err = -ENODEV;
+		goto out_put_device;
+	}
 
 	thdrv = to_intel_th_driver(dev->driver);
 	fops = fops_get(thdrv->fops);
@@ -828,10 +833,25 @@ static int intel_th_output_open(struct inode *inode, struct file *file)
 	}
 
 	return 0;
+
+out_put_device:
+	put_device(dev);
+
+	return err;
+}
+
+static int intel_th_output_release(struct inode *inode, struct file *file)
+{
+	struct intel_th_device *thdev = file->private_data;
+
+	put_device(&thdev->dev);
+
+	return 0;
 }
 
 static const struct file_operations intel_th_output_fops = {
 	.open	= intel_th_output_open,
+	.release = intel_th_output_release,
 	.llseek	= noop_llseek,
 };
 
