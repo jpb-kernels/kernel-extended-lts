@@ -516,7 +516,7 @@ config SERIAL_IMX
 
 config SERIAL_IMX_CONSOLE
 	bool "Console on IMX serial port"
-	depends on SERIAL_IMX=y
+	depends on SERIAL_IMX
 	select SERIAL_CORE_CONSOLE
 	select SERIAL_EARLYCON if OF
 	help
