@@ -765,8 +765,16 @@ static void __dma_rx_do_complete(struct uart_8250_port *p)
 	if (!dma->rx_running)
 		goto unlock;
 
-	dma->rx_running = 0;
-	dmaengine_tx_status(dma->rxchan, dma->rx_cookie, &state);
+	cookie = dma->rx_cookie;
+
+	/* Re-enable RX FIFO interrupt now that transfer is complete */
+	if (priv->habit & UART_HAS_RHR_IT_DIS) {
+		reg = serial_in(p, UART_OMAP_IER2);
+		reg &= ~UART_OMAP_IER2_RHR_IT_DIS;
+		serial_out(p, UART_OMAP_IER2, reg);
+	}
+
+	dmaengine_tx_status(rxchan, cookie, &state);
 
 	count = dma->rx_size - state.residue;
 	if (count < dma->rx_size)
@@ -775,6 +783,7 @@ static void __dma_rx_do_complete(struct uart_8250_port *p)
 		goto unlock;
 	ret = tty_insert_flip_string(tty_port, dma->rx_buf, count);
 
+	dma->rx_running = 0;
 	p->port.icount.rx += ret;
 	p->port.icount.buf_overrun += count - ret;
 unlock:
