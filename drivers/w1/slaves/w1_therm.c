@@ -597,6 +597,441 @@ static ssize_t w1_slave_show(struct device *device,
 	return ret;
 }
 
+static ssize_t w1_slave_store(struct device *device,
+			      struct device_attribute *attr, const char *buf,
+			      size_t size)
+{
+	int val, ret = 0;
+	struct w1_slave *sl = dev_to_w1_slave(device);
+
+	ret = kstrtoint(buf, 10, &val); /* converting user entry to int */
+
+	if (ret) {	/* conversion error */
+		dev_info(device,
+			"%s: conversion error. err= %d\n", __func__, ret);
+		return size;	/* return size to avoid call back again */
+	}
+
+	if ((!sl->family_data) || (!SLAVE_SPECIFIC_FUNC(sl))) {
+		dev_info(device,
+			"%s: Device not supported by the driver\n", __func__);
+		return size;  /* No device family */
+	}
+
+	if (val == 0)	/* val=0 : trigger a EEPROM save */
+		ret = copy_scratchpad(sl);
+	else {
+		if (SLAVE_SPECIFIC_FUNC(sl)->set_resolution)
+			ret = SLAVE_SPECIFIC_FUNC(sl)->set_resolution(sl, val);
+	}
+
+	if (ret) {
+		dev_warn(device, "%s: Set resolution - error %d\n", __func__, ret);
+		/* Propagate error to userspace */
+		return ret;
+	}
+	SLAVE_RESOLUTION(sl) = val;
+	/* Reset the conversion time to default - it depends on resolution */
+	SLAVE_CONV_TIME_OVERRIDE(sl) = CONV_TIME_DEFAULT;
+
+	return size; /* always return size to avoid infinite calling */
+}
+
+static ssize_t temperature_show(struct device *device,
+	struct device_attribute *attr, char *buf)
+{
+	struct w1_slave *sl = dev_to_w1_slave(device);
+	struct therm_info info;
+	int ret = 0;
+
+	if ((!sl->family_data) || (!SLAVE_SPECIFIC_FUNC(sl))) {
+		dev_info(device,
+			"%s: Device not supported by the driver\n", __func__);
+		return 0;  /* No device family */
+	}
+
+	if (bulk_read_support(sl)) {
+		if (SLAVE_CONVERT_TRIGGERED(sl) < 0) {
+			dev_dbg(device,
+				"%s: Conversion in progress, retry later\n",
+				__func__);
+			return 0;
+		} else if (SLAVE_CONVERT_TRIGGERED(sl) > 0) {
+			/* A bulk read has been issued, read the device RAM */
+			ret = read_scratchpad(sl, &info);
+			SLAVE_CONVERT_TRIGGERED(sl) = 0;
+		} else
+			ret = convert_t(sl, &info);
+	} else
+		ret = convert_t(sl, &info);
+
+	if (ret < 0) {
+		dev_dbg(device,
+			"%s: Temperature data may be corrupted. err=%d\n",
+			__func__, ret);
+		return 0;
+	}
+
+	return sprintf(buf, "%d\n", temperature_from_RAM(sl, info.rom));
+}
+
+static ssize_t ext_power_show(struct device *device,
+	struct device_attribute *attr, char *buf)
+{
+	struct w1_slave *sl = dev_to_w1_slave(device);
+
+	if (!sl->family_data) {
+		dev_info(device,
+			"%s: Device not supported by the driver\n", __func__);
+		return 0;  /* No device family */
+	}
+
+	/* Getting the power mode of the device {external, parasite} */
+	SLAVE_POWERMODE(sl) = read_powermode(sl);
+
+	if (SLAVE_POWERMODE(sl) < 0) {
+		dev_dbg(device,
+			"%s: Power_mode may be corrupted. err=%d\n",
+			__func__, SLAVE_POWERMODE(sl));
+	}
+	return sprintf(buf, "%d\n", SLAVE_POWERMODE(sl));
+}
+
+static ssize_t resolution_show(struct device *device,
+	struct device_attribute *attr, char *buf)
+{
+	struct w1_slave *sl = dev_to_w1_slave(device);
+
+	if ((!sl->family_data) || (!SLAVE_SPECIFIC_FUNC(sl))) {
+		dev_info(device,
+			"%s: Device not supported by the driver\n", __func__);
+		return 0;  /* No device family */
+	}
+
+	/* get the correct function depending on the device */
+	SLAVE_RESOLUTION(sl) = SLAVE_SPECIFIC_FUNC(sl)->get_resolution(sl);
+	if (SLAVE_RESOLUTION(sl) < 0) {
+		dev_dbg(device,
+			"%s: Resolution may be corrupted. err=%d\n",
+			__func__, SLAVE_RESOLUTION(sl));
+	}
+
+	return sprintf(buf, "%d\n", SLAVE_RESOLUTION(sl));
+}
+
+static ssize_t resolution_store(struct device *device,
+	struct device_attribute *attr, const char *buf, size_t size)
+{
+	struct w1_slave *sl = dev_to_w1_slave(device);
+	int val;
+	int ret = 0;
+
+	ret = kstrtoint(buf, 10, &val); /* converting user entry to int */
+
+	if (ret) {	/* conversion error */
+		dev_info(device,
+			"%s: conversion error. err= %d\n", __func__, ret);
+		return size;	/* return size to avoid call back again */
+	}
+
+	if ((!sl->family_data) || (!SLAVE_SPECIFIC_FUNC(sl))) {
+		dev_info(device,
+			"%s: Device not supported by the driver\n", __func__);
+		return size;  /* No device family */
+	}
+
+	/*
+	 * Don't deal with the val enterd by user,
+	 * only device knows what is correct or not
+	 */
+
+	/* get the correct function depending on the device */
+	ret = SLAVE_SPECIFIC_FUNC(sl)->set_resolution(sl, val);
+
+	if (ret)
+		return ret;
+
+	SLAVE_RESOLUTION(sl) = val;
+	/* Reset the conversion time to default because it depends on resolution */
+	SLAVE_CONV_TIME_OVERRIDE(sl) = CONV_TIME_DEFAULT;
+
+	return size;
+}
+
+static ssize_t eeprom_store(struct device *device,
+	struct device_attribute *attr, const char *buf, size_t size)
+{
+	struct w1_slave *sl = dev_to_w1_slave(device);
+	int ret = -EINVAL; /* Invalid argument */
+
+	if (size == sizeof(EEPROM_CMD_WRITE)) {
+		if (!strncmp(buf, EEPROM_CMD_WRITE, sizeof(EEPROM_CMD_WRITE)-1))
+			ret = copy_scratchpad(sl);
+	} else if (size == sizeof(EEPROM_CMD_READ)) {
+		if (!strncmp(buf, EEPROM_CMD_READ, sizeof(EEPROM_CMD_READ)-1))
+			ret = recall_eeprom(sl);
+	}
+
+	if (ret)
+		dev_info(device, "%s: error in process %d\n", __func__, ret);
+
+	return size;
+}
+
+static ssize_t alarms_show(struct device *device,
+	struct device_attribute *attr, char *buf)
+{
+	struct w1_slave *sl = dev_to_w1_slave(device);
+	int ret;
+	s8 th = 0, tl = 0;
+	struct therm_info scratchpad;
+
+	ret = read_scratchpad(sl, &scratchpad);
+
+	if (!ret)	{
+		th = scratchpad.rom[2]; /* TH is byte 2 */
+		tl = scratchpad.rom[3]; /* TL is byte 3 */
+	} else {
+		dev_info(device,
+			"%s: error reading alarms register %d\n",
+			__func__, ret);
+	}
+
+	return sprintf(buf, "%hd %hd\n", tl, th);
+}
+
+static ssize_t alarms_store(struct device *device,
+	struct device_attribute *attr, const char *buf, size_t size)
+{
+	struct w1_slave *sl = dev_to_w1_slave(device);
+	struct therm_info info;
+	u8 new_config_register[3];	/* array of data to be written */
+	int temp, ret;
+	char *token = NULL;
+	s8 tl, th;	/* 1 byte per value + temp ring order */
+	char *p_args, *orig;
+
+	p_args = orig = kmalloc(size, GFP_KERNEL);
+	/* Safe string copys as buf is const */
+	if (!p_args) {
+		dev_warn(device,
+			"%s: error unable to allocate memory %d\n",
+			__func__, -ENOMEM);
+		return size;
+	}
+	strcpy(p_args, buf);
+
+	/* Split string using space char */
+	token = strsep(&p_args, " ");
+
+	if (!token)	{
+		dev_info(device,
+			"%s: error parsing args %d\n", __func__, -EINVAL);
+		goto free_m;
+	}
+
+	/* Convert 1st entry to int */
+	ret = kstrtoint (token, 10, &temp);
+	if (ret) {
+		dev_info(device,
+			"%s: error parsing args %d\n", __func__, ret);
+		goto free_m;
+	}
+
+	tl = int_to_short(temp);
+
+	/* Split string using space char */
+	token = strsep(&p_args, " ");
+	if (!token)	{
+		dev_info(device,
+			"%s: error parsing args %d\n", __func__, -EINVAL);
+		goto free_m;
+	}
+	/* Convert 2nd entry to int */
+	ret = kstrtoint (token, 10, &temp);
+	if (ret) {
+		dev_info(device,
+			"%s: error parsing args %d\n", __func__, ret);
+		goto free_m;
+	}
+
+	/* Prepare to cast to short by eliminating out of range values */
+	th = int_to_short(temp);
+
+	/* Reorder if required th and tl */
+	if (tl > th)
+		swap(tl, th);
+
+	/*
+	 * Read the scratchpad to change only the required bits
+	 * (th : byte 2 - tl: byte 3)
+	 */
+	ret = read_scratchpad(sl, &info);
+	if (!ret) {
+		new_config_register[0] = th;	/* Byte 2 */
+		new_config_register[1] = tl;	/* Byte 3 */
+		new_config_register[2] = info.rom[4];/* Byte 4 */
+	} else {
+		dev_info(device,
+			"%s: error reading from the slave device %d\n",
+			__func__, ret);
+		goto free_m;
+	}
+
+	/* Write data in the device RAM */
+	if (!SLAVE_SPECIFIC_FUNC(sl)) {
+		dev_info(device,
+			"%s: Device not supported by the driver %d\n",
+			__func__, -ENODEV);
+		goto free_m;
+	}
+
+	ret = SLAVE_SPECIFIC_FUNC(sl)->write_data(sl, new_config_register);
+	if (ret)
+		dev_info(device,
+			"%s: error writing to the slave device %d\n",
+			__func__, ret);
+
+free_m:
+	/* free allocated memory */
+	kfree(orig);
+
+	return size;
+}
+
+static ssize_t therm_bulk_read_store(struct device *device,
+	struct device_attribute *attr, const char *buf, size_t size)
+{
+	struct w1_master *dev_master = dev_to_w1_master(device);
+	int ret = -EINVAL; /* Invalid argument */
+
+	if (size == sizeof(BULK_TRIGGER_CMD))
+		if (!strncmp(buf, BULK_TRIGGER_CMD,
+				sizeof(BULK_TRIGGER_CMD)-1))
+			ret = trigger_bulk_read(dev_master);
+
+	if (ret)
+		dev_info(device,
+			"%s: unable to trigger a bulk read on the bus. err=%d\n",
+			__func__, ret);
+
+	return size;
+}
+
+static ssize_t therm_bulk_read_show(struct device *device,
+	struct device_attribute *attr, char *buf)
+{
+	struct w1_master *dev_master = dev_to_w1_master(device);
+	struct w1_slave *sl = NULL;
+	int ret = 0;
+
+	list_for_each_entry(sl, &dev_master->slist, w1_slave_entry) {
+		if (sl->family_data) {
+			if (bulk_read_support(sl)) {
+				if (SLAVE_CONVERT_TRIGGERED(sl) == -1) {
+					ret = -1;
+					goto show_result;
+				}
+				if (SLAVE_CONVERT_TRIGGERED(sl) == 1)
+					/* continue to check other slaves */
+					ret = 1;
+			}
+		}
+	}
+show_result:
+	return sprintf(buf, "%d\n", ret);
+}
+
+static ssize_t conv_time_show(struct device *device,
+	struct device_attribute *attr, char *buf)
+{
+	struct w1_slave *sl = dev_to_w1_slave(device);
+
+	if ((!sl->family_data) || (!SLAVE_SPECIFIC_FUNC(sl))) {
+		dev_info(device,
+			"%s: Device is not supported by the driver\n", __func__);
+		return 0;  /* No device family */
+	}
+	return sprintf(buf, "%d\n", conversion_time(sl));
+}
+
+static ssize_t conv_time_store(struct device *device,
+	struct device_attribute *attr, const char *buf, size_t size)
+{
+	int val, ret = 0;
+	struct w1_slave *sl = dev_to_w1_slave(device);
+
+	if (kstrtoint(buf, 10, &val)) /* converting user entry to int */
+		return -EINVAL;
+
+	if (check_family_data(sl))
+		return -ENODEV;
+
+	if (val != CONV_TIME_MEASURE) {
+		if (val >= CONV_TIME_DEFAULT)
+			SLAVE_CONV_TIME_OVERRIDE(sl) = val;
+		else
+			return -EINVAL;
+
+	} else {
+		int conv_time;
+
+		ret = conv_time_measure(sl, &conv_time);
+		if (ret)
+			return -EIO;
+		SLAVE_CONV_TIME_OVERRIDE(sl) = conv_time;
+	}
+	return size;
+}
+
+static ssize_t features_show(struct device *device,
+			     struct device_attribute *attr, char *buf)
+{
+	struct w1_slave *sl = dev_to_w1_slave(device);
+
+	if ((!sl->family_data) || (!SLAVE_SPECIFIC_FUNC(sl))) {
+		dev_info(device,
+			 "%s: Device not supported by the driver\n", __func__);
+		return 0;  /* No device family */
+	}
+	return sprintf(buf, "%u\n", SLAVE_FEATURES(sl));
+}
+
+static ssize_t features_store(struct device *device,
+			      struct device_attribute *attr, const char *buf, size_t size)
+{
+	int val, ret = 0;
+	bool strong_pullup;
+	struct w1_slave *sl = dev_to_w1_slave(device);
+
+	ret = kstrtouint(buf, 10, &val); /* converting user entry to int */
+	if (ret)
+		return -EINVAL;  /* invalid number */
+
+	if ((!sl->family_data) || (!SLAVE_SPECIFIC_FUNC(sl))) {
+		dev_info(device, "%s: Device not supported by the driver\n", __func__);
+		return -ENODEV;
+	}
+
+	if ((val & W1_THERM_FEATURES_MASK) != val)
+		return -EINVAL;
+
+	SLAVE_FEATURES(sl) = val;
+
+	strong_pullup = (w1_strong_pullup == 2 ||
+			 (!SLAVE_POWERMODE(sl) &&
+			  w1_strong_pullup));
+
+	if (strong_pullup && SLAVE_FEATURES(sl) & W1_THERM_POLL_COMPLETION) {
+		dev_warn(&sl->dev,
+			 "%s: W1_THERM_POLL_COMPLETION disabled in parasite power mode.\n",
+			 __func__);
+		SLAVE_FEATURES(sl) &= ~W1_THERM_POLL_COMPLETION;
+	}
+
+	return size;
+}
+
 #if IS_REACHABLE(CONFIG_HWMON)
 static int w1_read_temp(struct device *device, u32 attr, int channel,
 			long *val)
