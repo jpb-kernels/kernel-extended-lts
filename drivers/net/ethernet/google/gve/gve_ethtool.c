@@ -137,8 +137,11 @@ gve_get_ethtool_stats(struct net_device *netdev,
 	data[i++] = tx_pkts;
 	data[i++] = rx_bytes;
 	data[i++] = tx_bytes;
-	/* Skip rx_dropped and tx_dropped */
-	i += 2;
+	/* total rx dropped packets */
+	data[i++] = rx_skb_alloc_fail + rx_desc_err_dropped_pkt;
+	/* Skip tx_dropped */
+	i++;
+
 	data[i++] = priv->tx_timeo_cnt;
 	i = GVE_MAIN_STATS_LEN;
 
@@ -187,6 +190,35 @@ gve_get_ethtool_stats(struct net_device *netdev,
 
 			data[i++] = rx->cnt;
 			data[i++] = rx->fill_cnt;
+			data[i++] = rx->cnt;
+			do {
+				start =
+				  u64_stats_fetch_begin_irq(&priv->rx[ring].statss);
+				tmp_rx_bytes = rx->rbytes;
+				tmp_rx_skb_alloc_fail = rx->rx_skb_alloc_fail;
+				tmp_rx_buf_alloc_fail = rx->rx_buf_alloc_fail;
+				tmp_rx_desc_err_dropped_pkt =
+					rx->rx_desc_err_dropped_pkt;
+			} while (u64_stats_fetch_retry_irq(&priv->rx[ring].statss,
+						       start));
+			data[i++] = tmp_rx_bytes;
+			/* rx dropped packets */
+			data[i++] = tmp_rx_skb_alloc_fail +
+				tmp_rx_desc_err_dropped_pkt;
+			data[i++] = rx->rx_copybreak_pkt;
+			data[i++] = rx->rx_copied_pkt;
+			/* stats from NIC */
+			if (skip_nic_stats) {
+				/* skip NIC rx stats */
+				i += NIC_RX_STATS_REPORT_NUM;
+				continue;
+			}
+			for (j = 0; j < NIC_RX_STATS_REPORT_NUM; j++) {
+				u64 value =
+				be64_to_cpu(report_stats[rx_qid_to_stats_idx[ring] + j].value);
+
+				data[i++] = value;
+			}
 		}
 	} else {
 		i += priv->rx_cfg.num_queues * NUM_GVE_RX_CNTS;
