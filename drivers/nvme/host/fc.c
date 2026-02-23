@@ -2853,7 +2853,7 @@ nvme_fc_delete_ctrl(struct nvme_ctrl *nctrl)
 {
 	struct nvme_fc_ctrl *ctrl = to_fc_ctrl(nctrl);
 
-	cancel_work_sync(&ctrl->err_work);
+	cancel_work_sync(&ctrl->ioerr_work);
 	cancel_delayed_work_sync(&ctrl->connect_work);
 	/*
 	 * kill the association on the link side.  this will block
@@ -2921,9 +2921,8 @@ __nvme_fc_terminate_io(struct nvme_fc_ctrl *ctrl)
 	if (ctrl->ctrl.state != NVME_CTRL_CONNECTING) {
 		nvme_stop_keep_alive(&ctrl->ctrl);
 
-		/* will block will waiting for io to terminate */
-		nvme_fc_delete_association(ctrl);
-	}
+	/* will block will waiting for io to terminate */
+	nvme_fc_delete_association(ctrl);
 
 	if (ctrl->ctrl.state != NVME_CTRL_CONNECTING &&
 	    !nvme_change_ctrl_state(&ctrl->ctrl, NVME_CTRL_CONNECTING))
