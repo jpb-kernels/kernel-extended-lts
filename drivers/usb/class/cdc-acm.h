@@ -144,3 +144,4 @@ struct acm {
 #define CLEAR_HALT_CONDITIONS		BIT(7)
 #define SEND_ZERO_PACKET		BIT(8)
 #define DISABLE_ECHO			BIT(9)
+#define MISSING_CAP_BRK			BIT(8)
