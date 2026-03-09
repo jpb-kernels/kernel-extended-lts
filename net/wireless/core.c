@@ -1019,6 +1019,7 @@ void wiphy_unregister(struct wiphy *wiphy)
 	rtnl_unlock();
 
 	flush_work(&rdev->scan_done_wk);
+	cancel_work_sync(&rdev->rfkill_block);
 	cancel_work_sync(&rdev->conn_work);
 	flush_work(&rdev->event_work);
 	cancel_delayed_work_sync(&rdev->dfs_update_channels_wk);
