@@ -985,6 +985,40 @@ static int tegra_pcie_dw_parse_dt(struct tegra_pcie_dw *pcie)
 	pcie->enable_cdm_check =
 		of_property_read_bool(np, "snps,enable-cdm-check");
 
+	if (pcie->mode == DW_PCIE_RC_TYPE)
+		return 0;
+
+	/* Endpoint mode specific DT entries */
+	pcie->pex_rst_gpiod = devm_gpiod_get(pcie->dev, "reset", GPIOD_IN);
+	if (IS_ERR(pcie->pex_rst_gpiod)) {
+		int err = PTR_ERR(pcie->pex_rst_gpiod);
+		const char *level = KERN_ERR;
+
+		if (err == -EPROBE_DEFER)
+			level = KERN_DEBUG;
+
+		dev_printk(level, pcie->dev,
+			   dev_fmt("Failed to get PERST GPIO: %d\n"),
+			   err);
+		return err;
+	}
+
+	pcie->pex_refclk_sel_gpiod = devm_gpiod_get_optional(pcie->dev,
+							     "nvidia,refclk-select",
+							     GPIOD_OUT_HIGH);
+	if (IS_ERR(pcie->pex_refclk_sel_gpiod)) {
+		int err = PTR_ERR(pcie->pex_refclk_sel_gpiod);
+		const char *level = KERN_ERR;
+
+		if (err == -EPROBE_DEFER)
+			level = KERN_DEBUG;
+
+		dev_printk(level, pcie->dev,
+			   dev_fmt("Failed to get REFCLK select GPIOs: %d\n"),
+			   err);
+		pcie->pex_refclk_sel_gpiod = NULL;
+	}
+
 	return 0;
 }
 
