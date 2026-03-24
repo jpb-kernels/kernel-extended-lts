@@ -1459,6 +1459,377 @@ fail_pm_get_sync:
 	return ret;
 }
 
+static void pex_ep_event_pex_rst_assert(struct tegra_pcie_dw *pcie)
+{
+	u32 val;
+	int ret;
+
+	if (pcie->ep_state == EP_STATE_DISABLED)
+		return;
+
+	/* Disable LTSSM */
+	val = appl_readl(pcie, APPL_CTRL);
+	val &= ~APPL_CTRL_LTSSM_EN;
+	appl_writel(pcie, val, APPL_CTRL);
+
+	ret = readl_poll_timeout(pcie->appl_base + APPL_DEBUG, val,
+				 ((val & APPL_DEBUG_LTSSM_STATE_MASK) >>
+				 APPL_DEBUG_LTSSM_STATE_SHIFT) ==
+				 LTSSM_STATE_PRE_DETECT,
+				 1, LTSSM_TIMEOUT);
+	if (ret)
+		dev_err(pcie->dev, "Failed to go Detect state: %d\n", ret);
+
+	reset_control_assert(pcie->core_rst);
+
+	tegra_pcie_disable_phy(pcie);
+
+	reset_control_assert(pcie->core_apb_rst);
+
+	clk_disable_unprepare(pcie->core_clk);
+
+	pm_runtime_put_sync(pcie->dev);
+
+	ret = tegra_pcie_bpmp_set_pll_state(pcie, false);
+	if (ret)
+		dev_err(pcie->dev, "Failed to turn off UPHY: %d\n", ret);
+
+	pcie->ep_state = EP_STATE_DISABLED;
+	dev_dbg(pcie->dev, "Uninitialization of endpoint is completed\n");
+}
+
+static void pex_ep_event_pex_rst_deassert(struct tegra_pcie_dw *pcie)
+{
+	struct dw_pcie *pci = &pcie->pci;
+	struct dw_pcie_ep *ep = &pci->ep;
+	struct device *dev = pcie->dev;
+	u32 val;
+	int ret;
+
+	if (pcie->ep_state == EP_STATE_ENABLED)
+		return;
+
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0) {
+		dev_err(dev, "Failed to get runtime sync for PCIe dev: %d\n",
+			ret);
+		return;
+	}
+
+	ret = tegra_pcie_bpmp_set_pll_state(pcie, true);
+	if (ret) {
+		dev_err(dev, "Failed to init UPHY for PCIe EP: %d\n", ret);
+		goto fail_pll_init;
+	}
+
+	ret = clk_prepare_enable(pcie->core_clk);
+	if (ret) {
+		dev_err(dev, "Failed to enable core clock: %d\n", ret);
+		goto fail_core_clk_enable;
+	}
+
+	ret = reset_control_deassert(pcie->core_apb_rst);
+	if (ret) {
+		dev_err(dev, "Failed to deassert core APB reset: %d\n", ret);
+		goto fail_core_apb_rst;
+	}
+
+	ret = tegra_pcie_enable_phy(pcie);
+	if (ret) {
+		dev_err(dev, "Failed to enable PHY: %d\n", ret);
+		goto fail_phy;
+	}
+
+	/* Clear any stale interrupt statuses */
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L0);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_0_0);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_1);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_2);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_3);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_6);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_7);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_8_0);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_9);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_10);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_11);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_13);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_14);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_15);
+	appl_writel(pcie, 0xFFFFFFFF, APPL_INTR_STATUS_L1_17);
+
+	/* configure this core for EP mode operation */
+	val = appl_readl(pcie, APPL_DM_TYPE);
+	val &= ~APPL_DM_TYPE_MASK;
+	val |= APPL_DM_TYPE_EP;
+	appl_writel(pcie, val, APPL_DM_TYPE);
+
+	appl_writel(pcie, 0x0, APPL_CFG_SLCG_OVERRIDE);
+
+	val = appl_readl(pcie, APPL_CTRL);
+	val |= APPL_CTRL_SYS_PRE_DET_STATE;
+	val |= APPL_CTRL_HW_HOT_RST_EN;
+	appl_writel(pcie, val, APPL_CTRL);
+
+	val = appl_readl(pcie, APPL_CFG_MISC);
+	val |= APPL_CFG_MISC_SLV_EP_MODE;
+	val |= (APPL_CFG_MISC_ARCACHE_VAL << APPL_CFG_MISC_ARCACHE_SHIFT);
+	appl_writel(pcie, val, APPL_CFG_MISC);
+
+	val = appl_readl(pcie, APPL_PINMUX);
+	val |= APPL_PINMUX_CLK_OUTPUT_IN_OVERRIDE_EN;
+	val |= APPL_PINMUX_CLK_OUTPUT_IN_OVERRIDE;
+	appl_writel(pcie, val, APPL_PINMUX);
+
+	appl_writel(pcie, pcie->dbi_res->start & APPL_CFG_BASE_ADDR_MASK,
+		    APPL_CFG_BASE_ADDR);
+
+	appl_writel(pcie, pcie->atu_dma_res->start &
+		    APPL_CFG_IATU_DMA_BASE_ADDR_MASK,
+		    APPL_CFG_IATU_DMA_BASE_ADDR);
+
+	val = appl_readl(pcie, APPL_INTR_EN_L0_0);
+	val |= APPL_INTR_EN_L0_0_SYS_INTR_EN;
+	val |= APPL_INTR_EN_L0_0_LINK_STATE_INT_EN;
+	val |= APPL_INTR_EN_L0_0_PCI_CMD_EN_INT_EN;
+	appl_writel(pcie, val, APPL_INTR_EN_L0_0);
+
+	val = appl_readl(pcie, APPL_INTR_EN_L1_0_0);
+	val |= APPL_INTR_EN_L1_0_0_HOT_RESET_DONE_INT_EN;
+	val |= APPL_INTR_EN_L1_0_0_RDLH_LINK_UP_INT_EN;
+	appl_writel(pcie, val, APPL_INTR_EN_L1_0_0);
+
+	reset_control_deassert(pcie->core_rst);
+
+	val = dw_pcie_readl_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL);
+	val &= ~PORT_LOGIC_SPEED_CHANGE;
+	dw_pcie_writel_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL, val);
+
+	if (pcie->update_fc_fixup) {
+		val = dw_pcie_readl_dbi(pci, CFG_TIMER_CTRL_MAX_FUNC_NUM_OFF);
+		val |= 0x1 << CFG_TIMER_CTRL_ACK_NAK_SHIFT;
+		dw_pcie_writel_dbi(pci, CFG_TIMER_CTRL_MAX_FUNC_NUM_OFF, val);
+	}
+
+	config_gen3_gen4_eq_presets(pcie);
+
+	init_host_aspm(pcie);
+
+	/* Disable ASPM-L1SS advertisement if there is no CLKREQ routing */
+	if (!pcie->supports_clkreq) {
+		disable_aspm_l11(pcie);
+		disable_aspm_l12(pcie);
+	}
+
+	val = dw_pcie_readl_dbi(pci, GEN3_RELATED_OFF);
+	val &= ~GEN3_RELATED_OFF_GEN3_ZRXDC_NONCOMPL;
+	dw_pcie_writel_dbi(pci, GEN3_RELATED_OFF, val);
+
+	pcie->pcie_cap_base = dw_pcie_find_capability(&pcie->pci,
+						      PCI_CAP_ID_EXP);
+	clk_set_rate(pcie->core_clk, GEN4_CORE_CLK_FREQ);
+
+	val = (ep->msi_mem_phys & MSIX_ADDR_MATCH_LOW_OFF_MASK);
+	val |= MSIX_ADDR_MATCH_LOW_OFF_EN;
+	dw_pcie_writel_dbi(pci, MSIX_ADDR_MATCH_LOW_OFF, val);
+	val = (upper_32_bits(ep->msi_mem_phys) & MSIX_ADDR_MATCH_HIGH_OFF_MASK);
+	dw_pcie_writel_dbi(pci, MSIX_ADDR_MATCH_HIGH_OFF, val);
+
+	ret = dw_pcie_ep_init_complete(ep);
+	if (ret) {
+		dev_err(dev, "Failed to complete initialization: %d\n", ret);
+		goto fail_init_complete;
+	}
+
+	dw_pcie_ep_init_notify(ep);
+
+	/* Enable LTSSM */
+	val = appl_readl(pcie, APPL_CTRL);
+	val |= APPL_CTRL_LTSSM_EN;
+	appl_writel(pcie, val, APPL_CTRL);
+
+	pcie->ep_state = EP_STATE_ENABLED;
+	dev_dbg(dev, "Initialization of endpoint is completed\n");
+
+	return;
+
+fail_init_complete:
+	reset_control_assert(pcie->core_rst);
+	tegra_pcie_disable_phy(pcie);
+fail_phy:
+	reset_control_assert(pcie->core_apb_rst);
+fail_core_apb_rst:
+	clk_disable_unprepare(pcie->core_clk);
+fail_core_clk_enable:
+	tegra_pcie_bpmp_set_pll_state(pcie, false);
+fail_pll_init:
+	pm_runtime_put_sync(dev);
+}
+
+static irqreturn_t tegra_pcie_ep_pex_rst_irq(int irq, void *arg)
+{
+	struct tegra_pcie_dw *pcie = arg;
+
+	if (gpiod_get_value(pcie->pex_rst_gpiod))
+		pex_ep_event_pex_rst_assert(pcie);
+	else
+		pex_ep_event_pex_rst_deassert(pcie);
+
+	return IRQ_HANDLED;
+}
+
+static int tegra_pcie_ep_raise_legacy_irq(struct tegra_pcie_dw *pcie, u16 irq)
+{
+	/* Tegra194 supports only INTA */
+	if (irq > 1)
+		return -EINVAL;
+
+	appl_writel(pcie, 1, APPL_LEGACY_INTX);
+	usleep_range(1000, 2000);
+	appl_writel(pcie, 0, APPL_LEGACY_INTX);
+	return 0;
+}
+
+static int tegra_pcie_ep_raise_msi_irq(struct tegra_pcie_dw *pcie, u16 irq)
+{
+	if (unlikely(irq > 32))
+		return -EINVAL;
+
+	appl_writel(pcie, BIT(irq - 1), APPL_MSI_CTRL_1);
+
+	return 0;
+}
+
+static int tegra_pcie_ep_raise_msix_irq(struct tegra_pcie_dw *pcie, u16 irq)
+{
+	struct dw_pcie_ep *ep = &pcie->pci.ep;
+
+	writel(irq, ep->msi_mem);
+
+	return 0;
+}
+
+static int tegra_pcie_ep_raise_irq(struct dw_pcie_ep *ep, u8 func_no,
+				   enum pci_epc_irq_type type,
+				   u16 interrupt_num)
+{
+	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
+	struct tegra_pcie_dw *pcie = to_tegra_pcie(pci);
+
+	switch (type) {
+	case PCI_EPC_IRQ_LEGACY:
+		return tegra_pcie_ep_raise_legacy_irq(pcie, interrupt_num);
+
+	case PCI_EPC_IRQ_MSI:
+		return tegra_pcie_ep_raise_msi_irq(pcie, interrupt_num);
+
+	case PCI_EPC_IRQ_MSIX:
+		return tegra_pcie_ep_raise_msix_irq(pcie, interrupt_num);
+
+	default:
+		dev_err(pci->dev, "Unknown IRQ type\n");
+		return -EPERM;
+	}
+
+	return 0;
+}
+
+static const struct pci_epc_features tegra_pcie_epc_features = {
+	.linkup_notifier = true,
+	.core_init_notifier = true,
+	.msi_capable = false,
+	.msix_capable = false,
+	.reserved_bar = 1 << BAR_2 | 1 << BAR_3 | 1 << BAR_4 | 1 << BAR_5,
+	.bar_fixed_64bit = 1 << BAR_0,
+	.bar_fixed_size[0] = SZ_1M,
+};
+
+static const struct pci_epc_features*
+tegra_pcie_ep_get_features(struct dw_pcie_ep *ep)
+{
+	return &tegra_pcie_epc_features;
+}
+
+static struct dw_pcie_ep_ops pcie_ep_ops = {
+	.raise_irq = tegra_pcie_ep_raise_irq,
+	.get_features = tegra_pcie_ep_get_features,
+};
+
+static int tegra_pcie_config_ep(struct tegra_pcie_dw *pcie,
+				struct platform_device *pdev)
+{
+	struct dw_pcie *pci = &pcie->pci;
+	struct device *dev = pcie->dev;
+	struct dw_pcie_ep *ep;
+	struct resource *res;
+	char *name;
+	int ret;
+
+	ep = &pci->ep;
+	ep->ops = &pcie_ep_ops;
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "addr_space");
+	if (!res)
+		return -EINVAL;
+
+	ep->phys_base = res->start;
+	ep->addr_size = resource_size(res);
+	ep->page_size = SZ_64K;
+
+	ret = gpiod_set_debounce(pcie->pex_rst_gpiod, PERST_DEBOUNCE_TIME);
+	if (ret < 0) {
+		dev_err(dev, "Failed to set PERST GPIO debounce time: %d\n",
+			ret);
+		return ret;
+	}
+
+	ret = gpiod_to_irq(pcie->pex_rst_gpiod);
+	if (ret < 0) {
+		dev_err(dev, "Failed to get IRQ for PERST GPIO: %d\n", ret);
+		return ret;
+	}
+	pcie->pex_rst_irq = (unsigned int)ret;
+
+	name = devm_kasprintf(dev, GFP_KERNEL, "tegra_pcie_%u_pex_rst_irq",
+			      pcie->cid);
+	if (!name) {
+		dev_err(dev, "Failed to create PERST IRQ string\n");
+		return -ENOMEM;
+	}
+
+	irq_set_status_flags(pcie->pex_rst_irq, IRQ_NOAUTOEN);
+
+	pcie->ep_state = EP_STATE_DISABLED;
+
+	ret = devm_request_threaded_irq(dev, pcie->pex_rst_irq, NULL,
+					tegra_pcie_ep_pex_rst_irq,
+					IRQF_TRIGGER_RISING |
+					IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
+					name, (void *)pcie);
+	if (ret < 0) {
+		dev_err(dev, "Failed to request IRQ for PERST: %d\n", ret);
+		return ret;
+	}
+
+	name = devm_kasprintf(dev, GFP_KERNEL, "tegra_pcie_%u_ep_work",
+			      pcie->cid);
+	if (!name) {
+		dev_err(dev, "Failed to create PCIe EP work thread string\n");
+		return -ENOMEM;
+	}
+
+	pm_runtime_enable(dev);
+
+	ret = dw_pcie_ep_init(ep);
+	if (ret) {
+		dev_err(dev, "Failed to initialize DWC Endpoint subsystem: %d\n",
+			ret);
+		pm_runtime_disable(dev);
+		return ret;
+	}
+
+	return 0;
+}
+
 static int tegra_pcie_dw_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
