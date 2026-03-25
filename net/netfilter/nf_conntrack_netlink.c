@@ -820,6 +820,39 @@ struct ctnetlink_filter {
 	} mark;
 };
 
+static const struct nla_policy cta_filter_nla_policy[CTA_FILTER_MAX + 1] = {
+	[CTA_FILTER_ORIG_FLAGS]		= NLA_POLICY_MASK(NLA_U32, CTA_FILTER_F_ALL),
+	[CTA_FILTER_REPLY_FLAGS]	= NLA_POLICY_MASK(NLA_U32, CTA_FILTER_F_ALL),
+};
+
+static int ctnetlink_parse_filter(const struct nlattr *attr,
+				  struct ctnetlink_filter *filter)
+{
+	struct nlattr *tb[CTA_FILTER_MAX + 1];
+	int ret = 0;
+
+	ret = nla_parse_nested(tb, CTA_FILTER_MAX, attr, cta_filter_nla_policy,
+			       NULL);
+	if (ret)
+		return ret;
+
+	if (tb[CTA_FILTER_ORIG_FLAGS])
+		filter->orig_flags = nla_get_u32(tb[CTA_FILTER_ORIG_FLAGS]);
+
+	if (tb[CTA_FILTER_REPLY_FLAGS])
+		filter->reply_flags = nla_get_u32(tb[CTA_FILTER_REPLY_FLAGS]);
+
+	return 0;
+}
+
+static int ctnetlink_parse_zone(const struct nlattr *attr,
+				struct nf_conntrack_zone *zone);
+static int ctnetlink_parse_tuple_filter(const struct nlattr * const cda[],
+					 struct nf_conntrack_tuple *tuple,
+					 u32 type, u_int8_t l3num,
+					 struct nf_conntrack_zone *zone,
+					 u_int32_t flags);
+
 static struct ctnetlink_filter *
 ctnetlink_alloc_filter(const struct nlattr * const cda[], u8 family)
 {
@@ -2333,7 +2366,7 @@ static const struct nla_policy exp_nla_policy[CTA_EXPECT_MAX+1] = {
 	[CTA_EXPECT_HELP_NAME]	= { .type = NLA_NUL_STRING,
 				    .len = NF_CT_HELPER_NAME_LEN - 1 },
 	[CTA_EXPECT_ZONE]	= { .type = NLA_U16 },
-	[CTA_EXPECT_FLAGS]	= { .type = NLA_U32 },
+	[CTA_EXPECT_FLAGS]	= NLA_POLICY_MASK(NLA_BE32, NF_CT_EXPECT_MASK),
 	[CTA_EXPECT_CLASS]	= { .type = NLA_U32 },
 	[CTA_EXPECT_NAT]	= { .type = NLA_NESTED },
 	[CTA_EXPECT_FN]		= { .type = NLA_NUL_STRING },
