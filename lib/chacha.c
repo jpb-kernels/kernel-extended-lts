@@ -85,6 +85,8 @@ void chacha_block(u32 *state, u8 *stream, int nrounds)
 		put_unaligned_le32(x[i] + state[i], &stream[i * sizeof(u32)]);
 
 	state[12]++;
+
+	memzero_explicit(x, sizeof(x));
 }
 EXPORT_SYMBOL(chacha_block);
 
@@ -109,5 +111,7 @@ void hchacha_block(const u32 *in, u32 *out, int nrounds)
 
 	memcpy(&out[0], &x[0], 16);
 	memcpy(&out[4], &x[12], 16);
+
+	memzero_explicit(x, sizeof(x));
 }
 EXPORT_SYMBOL(hchacha_block);
