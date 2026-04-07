@@ -981,16 +981,8 @@ static void init_amd_zn(struct cpuinfo_x86 *c)
 			set_cpu_cap(c, X86_FEATURE_BTC_NO);
 	}
 
-	/*
-	 * Work around Erratum 1386.  The XSAVES instruction malfunctions in
-	 * certain circumstances on Zen1/2 uarch, and not all parts have had
-	 * updated microcode at the time of writing (March 2023).
-	 *
-	 * Affected parts all have no supervisor XSAVE states, meaning that
-	 * the XSAVEC instruction (which works fine) is equivalent.
-	 */
-	if (c->x86 == 0x17)
-		clear_cpu_cap(c, X86_FEATURE_XSAVES);
+	pr_notice_once("AMD Zen1 FPDSS bug detected, enabling mitigation.\n");
+	msr_set_bit(MSR_AMD64_FP_CFG, MSR_AMD64_FP_CFG_ZEN1_DENORM_FIX_BIT);
 }
 
 static bool cpu_has_zenbleed_microcode(void)
