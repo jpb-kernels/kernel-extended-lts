@@ -90,8 +90,17 @@ static void
 gve_get_ethtool_stats(struct net_device *netdev,
 		      struct ethtool_stats *stats, u64 *data)
 {
-	struct gve_priv *priv = netdev_priv(netdev);
-	u64 rx_pkts, rx_bytes, tx_pkts, tx_bytes;
+	u64 tmp_rx_pkts, tmp_rx_bytes, tmp_rx_skb_alloc_fail,	tmp_rx_buf_alloc_fail,
+		tmp_rx_desc_err_dropped_pkt, tmp_tx_pkts, tmp_tx_bytes;
+	u64 rx_buf_alloc_fail, rx_desc_err_dropped_pkt, rx_pkts,
+		rx_skb_alloc_fail, rx_bytes, tx_pkts, tx_bytes;
+	int rx_base_stats_idx, max_rx_stats_idx, max_tx_stats_idx;
+	int stats_idx, stats_region_len, nic_stats_len;
+	struct stats *report_stats;
+	int *rx_qid_to_stats_idx;
+	int *tx_qid_to_stats_idx;
+	struct gve_priv *priv;
+	bool skip_nic_stats;
 	unsigned int start;
 	int ring;
 	int i;
@@ -128,11 +137,52 @@ gve_get_ethtool_stats(struct net_device *netdev,
 	data[i++] = tx_pkts;
 	data[i++] = rx_bytes;
 	data[i++] = tx_bytes;
-	/* Skip rx_dropped and tx_dropped */
-	i += 2;
+	/* total rx dropped packets */
+	data[i++] = rx_skb_alloc_fail + rx_desc_err_dropped_pkt;
+	/* Skip tx_dropped */
+	i++;
+
 	data[i++] = priv->tx_timeo_cnt;
 	i = GVE_MAIN_STATS_LEN;
 
+	rx_base_stats_idx = 0;
+	max_rx_stats_idx = 0;
+	max_tx_stats_idx = 0;
+	stats_region_len = priv->stats_report_len -
+				sizeof(struct gve_stats_report);
+	nic_stats_len = (NIC_RX_STATS_REPORT_NUM * priv->rx_cfg.num_queues +
+		NIC_TX_STATS_REPORT_NUM * priv->tx_cfg.num_queues) *
+		sizeof(struct stats);
+	if (unlikely((stats_region_len -
+				nic_stats_len) % sizeof(struct stats))) {
+		net_err_ratelimited("Starting index of NIC stats should be multiple of stats size");
+	} else {
+		/* For rx cross-reporting stats,
+		 * start from nic rx stats in report
+		 */
+		rx_base_stats_idx = (stats_region_len - nic_stats_len) /
+							sizeof(struct stats);
+		max_rx_stats_idx = NIC_RX_STATS_REPORT_NUM *
+			priv->rx_cfg.num_queues +
+			rx_base_stats_idx;
+		max_tx_stats_idx = NIC_TX_STATS_REPORT_NUM *
+			priv->tx_cfg.num_queues +
+			max_rx_stats_idx;
+	}
+	/* Preprocess the stats report for rx, map queue id to start index */
+	skip_nic_stats = false;
+	for (stats_idx = rx_base_stats_idx; stats_idx < max_rx_stats_idx;
+		stats_idx += NIC_RX_STATS_REPORT_NUM) {
+		u32 stat_name = be32_to_cpu(report_stats[stats_idx].stat_name);
+		u32 queue_id = be32_to_cpu(report_stats[stats_idx].queue_id);
+
+		if (stat_name == 0) {
+			/* no stats written by NIC yet */
+			skip_nic_stats = true;
+			break;
+		}
+		rx_qid_to_stats_idx[queue_id] = stats_idx;
+	}
 	/* walk RX rings */
 	if (priv->rx) {
 		for (ring = 0; ring < priv->rx_cfg.num_queues; ring++) {
@@ -140,9 +190,53 @@ gve_get_ethtool_stats(struct net_device *netdev,
 
 			data[i++] = rx->cnt;
 			data[i++] = rx->fill_cnt;
+			data[i++] = rx->cnt;
+			do {
+				start =
+				  u64_stats_fetch_begin_irq(&priv->rx[ring].statss);
+				tmp_rx_bytes = rx->rbytes;
+				tmp_rx_skb_alloc_fail = rx->rx_skb_alloc_fail;
+				tmp_rx_buf_alloc_fail = rx->rx_buf_alloc_fail;
+				tmp_rx_desc_err_dropped_pkt =
+					rx->rx_desc_err_dropped_pkt;
+			} while (u64_stats_fetch_retry_irq(&priv->rx[ring].statss,
+						       start));
+			data[i++] = tmp_rx_bytes;
+			/* rx dropped packets */
+			data[i++] = tmp_rx_skb_alloc_fail +
+				tmp_rx_desc_err_dropped_pkt;
+			data[i++] = rx->rx_copybreak_pkt;
+			data[i++] = rx->rx_copied_pkt;
+			/* stats from NIC */
+			if (skip_nic_stats) {
+				/* skip NIC rx stats */
+				i += NIC_RX_STATS_REPORT_NUM;
+				continue;
+			}
+			for (j = 0; j < NIC_RX_STATS_REPORT_NUM; j++) {
+				u64 value =
+				be64_to_cpu(report_stats[rx_qid_to_stats_idx[ring] + j].value);
+
+				data[i++] = value;
+			}
 		}
 	} else {
 		i += priv->rx_cfg.num_queues * NUM_GVE_RX_CNTS;
+	}
+
+	skip_nic_stats = false;
+	/* NIC TX stats start right after NIC RX stats */
+	for (stats_idx = max_rx_stats_idx; stats_idx < max_tx_stats_idx;
+		stats_idx += NIC_TX_STATS_REPORT_NUM) {
+		u32 stat_name = be32_to_cpu(report_stats[stats_idx].stat_name);
+		u32 queue_id = be32_to_cpu(report_stats[stats_idx].queue_id);
+
+		if (stat_name == 0) {
+			/* no stats written by NIC yet */
+			skip_nic_stats = true;
+			break;
+		}
+		tx_qid_to_stats_idx[queue_id] = stats_idx;
 	}
 	/* walk TX rings */
 	if (priv->tx) {

@@ -83,6 +83,68 @@ static void gve_free_counter_array(struct gve_priv *priv)
 	priv->counter_array = NULL;
 }
 
+/* NIC requests to report stats */
+static void gve_stats_report_task(struct work_struct *work)
+{
+	struct gve_priv *priv = container_of(work, struct gve_priv,
+					     stats_report_task);
+	if (gve_get_do_report_stats(priv)) {
+		gve_handle_report_stats(priv);
+		gve_clear_do_report_stats(priv);
+	}
+}
+
+static void gve_stats_report_schedule(struct gve_priv *priv)
+{
+	if (!gve_get_probe_in_progress(priv) &&
+	    !gve_get_reset_in_progress(priv)) {
+		gve_set_do_report_stats(priv);
+		queue_work(priv->gve_wq, &priv->stats_report_task);
+	}
+}
+
+static void gve_stats_report_timer(struct timer_list *t)
+{
+	struct gve_priv *priv = from_timer(priv, t, stats_report_timer);
+
+	mod_timer(&priv->stats_report_timer,
+		  round_jiffies(jiffies +
+		  msecs_to_jiffies(priv->stats_report_timer_period)));
+	gve_stats_report_schedule(priv);
+}
+
+static int gve_alloc_stats_report(struct gve_priv *priv)
+{
+	int tx_stats_num, rx_stats_num;
+
+	tx_stats_num = (GVE_TX_STATS_REPORT_NUM + NIC_TX_STATS_REPORT_NUM) *
+				priv->tx_cfg.max_queues;
+	rx_stats_num = (GVE_RX_STATS_REPORT_NUM + NIC_RX_STATS_REPORT_NUM) *
+				priv->rx_cfg.max_queues;
+	priv->stats_report_len = struct_size(priv->stats_report, stats,
+					     size_add(tx_stats_num, rx_stats_num));
+	priv->stats_report =
+		dma_alloc_coherent(&priv->pdev->dev, priv->stats_report_len,
+				   &priv->stats_report_bus, GFP_KERNEL);
+	if (!priv->stats_report)
+		return -ENOMEM;
+	/* Set up timer for the report-stats task */
+	timer_setup(&priv->stats_report_timer, gve_stats_report_timer, 0);
+	priv->stats_report_timer_period = GVE_STATS_REPORT_TIMER_PERIOD;
+	return 0;
+}
+
+static void gve_free_stats_report(struct gve_priv *priv)
+{
+	if (!priv->stats_report)
+		return;
+
+	del_timer_sync(&priv->stats_report_timer);
+	dma_free_coherent(&priv->pdev->dev, priv->stats_report_len,
+			  priv->stats_report, priv->stats_report_bus);
+	priv->stats_report = NULL;
+}
+
 static irqreturn_t gve_mgmnt_intr(int irq, void *arg)
 {
 	struct gve_priv *priv = arg;
