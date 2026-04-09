@@ -44,16 +44,51 @@ static int mlx5e_dcbnl_ieee_getets(struct net_device *netdev,
 	struct mlx5e_priv *priv = netdev_priv(netdev);
 
 	if (!MLX5_CAP_GEN(priv->mdev, ets))
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 
-	memcpy(ets, &priv->params.ets, sizeof(*ets));
-	return 0;
+	for (i = 0; i < IEEE_8021QAZ_MAX_TCS; i++) {
+		err = mlx5_query_port_prio_tc(mdev, i, &ets->prio_tc[i]);
+		if (err)
+			return err;
+	}
+
+	ets->ets_cap = mlx5_max_tc(priv->mdev) + 1;
+	for (i = 0; i < ets->ets_cap; i++) {
+		err = mlx5_query_port_tc_group(mdev, i, &tc_group[i]);
+		if (err)
+			return err;
+
+		err = mlx5_query_port_tc_bw_alloc(mdev, i, &ets->tc_tx_bw[i]);
+		if (err)
+			return err;
+
+		if (ets->tc_tx_bw[i] < MLX5E_MAX_BW_ALLOC &&
+		    tc_group[i] == (MLX5E_LOWEST_PRIO_GROUP + 1))
+			is_zero_bw_ets_tc = true;
+
+		if (tc_group[i] == (MLX5E_VENDOR_TC_GROUP_NUM - 1))
+			is_tc_group_6_exist = true;
+	}
+
+	/* Report 0% ets tc if exits*/
+	if (is_zero_bw_ets_tc) {
+		for (i = 0; i < ets->ets_cap; i++)
+			if (tc_group[i] == MLX5E_LOWEST_PRIO_GROUP)
+				ets->tc_tx_bw[i] = 0;
+	}
+
+	/* Update tc_tsa based on fw setting*/
+	for (i = 0; i < ets->ets_cap; i++) {
+		if (ets->tc_tx_bw[i] < MLX5E_MAX_BW_ALLOC)
+			priv->dcbx.tc_tsa[i] = IEEE_8021QAZ_TSA_ETS;
+		else if (tc_group[i] == MLX5E_VENDOR_TC_GROUP_NUM &&
+			 !is_tc_group_6_exist)
+			priv->dcbx.tc_tsa[i] = IEEE_8021QAZ_TSA_VENDOR;
+	}
+	memcpy(ets->tc_tsa, priv->dcbx.tc_tsa, sizeof(ets->tc_tsa));
+
+	return err;
 }
-
-enum {
-	MLX5E_VENDOR_TC_GROUP_NUM = 7,
-	MLX5E_ETS_TC_GROUP_NUM    = 0,
-};
 
 static void mlx5e_build_tc_group(struct ieee_ets *ets, u8 *tc_group, int max_tc)
 {

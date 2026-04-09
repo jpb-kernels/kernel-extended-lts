@@ -445,14 +445,46 @@ u64 alarm_forward(struct alarm *alarm, ktime_t now, ktime_t interval)
 }
 EXPORT_SYMBOL_GPL(alarm_forward);
 
-u64 alarm_forward_now(struct alarm *alarm, ktime_t interval)
+static u64 __alarm_forward_now(struct alarm *alarm, ktime_t interval, bool throttle)
 {
 	struct alarm_base *base = &alarm_bases[alarm->type];
-
+	
 	return alarm_forward(alarm, base->gettime(), interval);
 }
 EXPORT_SYMBOL_GPL(alarm_forward_now);
 
+#ifdef CONFIG_POSIX_TIMERS
+
+static void alarmtimer_freezerset(ktime_t absexp, enum alarmtimer_type type)
+{
+	struct alarm_base *base;
+	unsigned long flags;
+	ktime_t delta;
+
+	switch(type) {
+	case ALARM_REALTIME:
+		base = &alarm_bases[ALARM_REALTIME];
+		type = ALARM_REALTIME_FREEZER;
+		break;
+	case ALARM_BOOTTIME:
+		base = &alarm_bases[ALARM_BOOTTIME];
+		type = ALARM_BOOTTIME_FREEZER;
+		break;
+	default:
+		WARN_ONCE(1, "Invalid alarm type: %d\n", type);
+		return;
+	}
+
+	delta = ktime_sub(absexp, base->gettime());
+
+	spin_lock_irqsave(&freezer_delta_lock, flags);
+	if (!freezer_delta || (delta < freezer_delta)) {
+		freezer_delta = delta;
+		freezer_expires = absexp;
+		freezer_alarmtype = type;
+	}
+	spin_unlock_irqrestore(&freezer_delta_lock, flags);
+}
 
 /**
  * clock2alarm - helper that converts from clockid to alarmtypes
@@ -482,15 +514,20 @@ static enum alarmtimer_restart alarm_handle_timer(struct alarm *alarm,
 	enum alarmtimer_restart result = ALARMTIMER_NORESTART;
 
 	spin_lock_irqsave(&ptr->it_lock, flags);
-	if ((ptr->it_sigev_notify & ~SIGEV_THREAD_ID) != SIGEV_NONE) {
-		if (posix_timer_event(ptr, 0) != 0)
-			ptr->it_overrun++;
-	}
 
-	/* Re-add periodic timers */
-	if (ptr->it.alarm.interval.tv64) {
-		ptr->it_overrun += alarm_forward(alarm, now,
-						ptr->it.alarm.interval);
+	ptr->it_active = 0;
+	if (ptr->it_interval)
+		si_private = ++ptr->it_requeue_pending;
+
+	if (posix_timer_event(ptr, si_private) && ptr->it_interval) {
+		/*
+		 * Handle ignored signals and rearm the timer. This will go
+		 * away once we handle ignored signals proper. Ensure that
+		 * small intervals cannot starve the system.
+		 */
+		ptr->it_overrun += __alarm_forward_now(alarm, ptr->it_interval, true);
+		++ptr->it_requeue_pending;
+		ptr->it_active = 1;
 		result = ALARMTIMER_RESTART;
 	}
 	spin_unlock_irqrestore(&ptr->it_lock, flags);
