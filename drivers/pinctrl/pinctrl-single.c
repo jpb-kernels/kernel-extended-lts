@@ -465,7 +465,10 @@ static int pcs_set_mux(struct pinctrl_dev *pctldev, unsigned fselector,
 	/* If function mask is null, needn't enable it. */
 	if (!pcs->fmask)
 		return 0;
-	func = radix_tree_lookup(&pcs->ftree, fselector);
+	function = pinmux_generic_get_function(pctldev, fselector);
+	if (!function)
+		return -EINVAL;
+	func = function->data;
 	if (!func)
 		return -EINVAL;
 
