@@ -1,6 +1,6 @@
 VERSION = 4
 PATCHLEVEL = 9
-SUBLEVEL = 341
+SUBLEVEL = 342
 EXTRAVERSION = jpb-elts
 NAME = Roaring Lionus
 
