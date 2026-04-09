@@ -3291,6 +3291,9 @@ qed_iov_configure_min_tx_rate(struct qed_dev *cdev, int vfid, u32 rate)
 	}
 
 	vf = qed_iov_get_vf_info(QED_LEADING_HWFN(cdev), (u16)vfid, true);
+	if (!vf)
+		return -EINVAL;
+
 	vport_id = vf->vport_id;
 
 	return qed_configure_vport_wfq(cdev, vport_id, rate);
@@ -3841,6 +3844,78 @@ static void qed_handle_bulletin_post(struct qed_hwfn *hwfn)
 	    qed_iov_post_vf_bulletin(hwfn, i, ptt);
 
 	qed_ptt_release(hwfn, ptt);
+}
+
+static void qed_iov_handle_trust_change(struct qed_hwfn *hwfn)
+{
+	struct qed_sp_vport_update_params params;
+	struct qed_filter_accept_flags *flags;
+	struct qed_public_vf_info *vf_info;
+	struct qed_vf_info *vf;
+	u8 mask;
+	int i;
+
+	mask = QED_ACCEPT_UCAST_UNMATCHED | QED_ACCEPT_MCAST_UNMATCHED;
+	flags = &params.accept_flags;
+
+	qed_for_each_vf(hwfn, i) {
+		/* Need to make sure current requested configuration didn't
+		 * flip so that we'll end up configuring something that's not
+		 * needed.
+		 */
+		vf_info = qed_iov_get_public_vf_info(hwfn, i, true);
+		if (vf_info->is_trusted_configured ==
+		    vf_info->is_trusted_request)
+			continue;
+		vf_info->is_trusted_configured = vf_info->is_trusted_request;
+
+		/* Validate that the VF has a configured vport */
+		vf = qed_iov_get_vf_info(hwfn, i, true);
+		if (!vf || !vf->vport_instance)
+			continue;
+
+		memset(&params, 0, sizeof(params));
+		params.opaque_fid = vf->opaque_fid;
+		params.vport_id = vf->vport_id;
+
+		params.update_ctl_frame_check = 1;
+		params.mac_chk_en = !vf_info->is_trusted_configured;
+		params.update_accept_any_vlan_flg = 0;
+
+		if (vf_info->accept_any_vlan && vf_info->forced_vlan) {
+			params.update_accept_any_vlan_flg = 1;
+			params.accept_any_vlan = vf_info->accept_any_vlan;
+		}
+
+		if (vf_info->rx_accept_mode & mask) {
+			flags->update_rx_mode_config = 1;
+			flags->rx_accept_filter = vf_info->rx_accept_mode;
+		}
+
+		if (vf_info->tx_accept_mode & mask) {
+			flags->update_tx_mode_config = 1;
+			flags->tx_accept_filter = vf_info->tx_accept_mode;
+		}
+
+		/* Remove if needed; Otherwise this would set the mask */
+		if (!vf_info->is_trusted_configured) {
+			flags->rx_accept_filter &= ~mask;
+			flags->tx_accept_filter &= ~mask;
+			params.accept_any_vlan = false;
+		}
+
+		if (flags->update_rx_mode_config ||
+		    flags->update_tx_mode_config ||
+		    params.update_ctl_frame_check ||
+		    params.update_accept_any_vlan_flg) {
+			DP_VERBOSE(hwfn, QED_MSG_IOV,
+				   "vport update config for %s VF[abs 0x%x rel 0x%x]\n",
+				   vf_info->is_trusted_configured ? "trusted" : "untrusted",
+				   vf->abs_vf_id, vf->relative_vf_id);
+			qed_sp_vport_update(hwfn, &params,
+					    QED_SPQ_MODE_EBLOCK, NULL);
+		}
+	}
 }
 
 static void qed_iov_pf_task(struct work_struct *work)

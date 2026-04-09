@@ -101,6 +101,53 @@ static int btqcomsmd_close(struct hci_dev *hdev)
 	return 0;
 }
 
+static int btqcomsmd_setup(struct hci_dev *hdev)
+{
+	struct btqcomsmd *btq = hci_get_drvdata(hdev);
+	struct sk_buff *skb;
+	int err;
+
+	skb = __hci_cmd_sync(hdev, HCI_OP_RESET, 0, NULL, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+	kfree_skb(skb);
+
+	/* Devices do not have persistent storage for BD address. If no
+	 * BD address has been retrieved during probe, mark the device
+	 * as having an invalid BD address.
+	 */
+	if (!bacmp(&btq->bdaddr, BDADDR_ANY)) {
+		set_bit(HCI_QUIRK_INVALID_BDADDR, &hdev->quirks);
+		return 0;
+	}
+
+	/* When setting a configured BD address fails, mark the device
+	 * as having an invalid BD address.
+	 */
+	err = qca_set_bdaddr_rome(hdev, &btq->bdaddr);
+	if (err) {
+		set_bit(HCI_QUIRK_INVALID_BDADDR, &hdev->quirks);
+		return 0;
+	}
+
+	return 0;
+}
+
+static int btqcomsmd_set_bdaddr(struct hci_dev *hdev, const bdaddr_t *bdaddr)
+{
+	int ret;
+
+	ret = qca_set_bdaddr_rome(hdev, bdaddr);
+	if (ret)
+		return ret;
+
+	/* The firmware stops responding for a while after setting the bdaddr,
+	 * causing timeouts for subsequent commands. Sleep a bit to avoid this.
+	 */
+	usleep_range(1000, 10000);
+	return 0;
+}
+
 static int btqcomsmd_probe(struct platform_device *pdev)
 {
 	struct btqcomsmd *btq;
@@ -139,7 +186,8 @@ static int btqcomsmd_probe(struct platform_device *pdev)
 	hdev->open = btqcomsmd_open;
 	hdev->close = btqcomsmd_close;
 	hdev->send = btqcomsmd_send;
-	hdev->set_bdaddr = qca_set_bdaddr_rome;
+	hdev->setup = btqcomsmd_setup;
+	hdev->set_bdaddr = btqcomsmd_set_bdaddr;
 
 	ret = hci_register_dev(hdev);
 	if (ret < 0) {
