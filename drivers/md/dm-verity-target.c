@@ -1130,7 +1130,12 @@ EXPORT_SYMBOL_GPL(verity_ctr);
 
 static struct target_type verity_target = {
 	.name		= "verity",
+<<<<<<< HEAD
 	.version	= {1, 4, 0},
+=======
+	.features	= DM_TARGET_IMMUTABLE,
+	.version	= {1, 3, 0},
+>>>>>>> linux-4.9.y
 	.module		= THIS_MODULE,
 	.ctr		= verity_ctr,
 	.dtr		= verity_dtr,

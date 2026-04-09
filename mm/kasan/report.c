@@ -176,8 +176,12 @@ static void kasan_end_report(unsigned long *flags)
 	pr_err("==================================================================\n");
 	add_taint(TAINT_BAD_PAGE, LOCKDEP_NOW_UNRELIABLE);
 	spin_unlock_irqrestore(&report_lock, *flags);
+<<<<<<< HEAD
 	if (panic_on_warn)
 		panic("panic_on_warn set ...\n");
+=======
+	check_panic_on_warn("KASAN");
+>>>>>>> linux-4.9.y
 	kasan_enable_current();
 }
 
