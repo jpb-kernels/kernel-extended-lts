@@ -1956,7 +1956,10 @@ static int ethtool_get_phy_stats(struct net_device *dev, void __user *useraddr)
 
 	if (n_stats < 0)
 		return n_stats;
-	WARN_ON(n_stats == 0);
+	if (n_stats > S32_MAX / sizeof(u64))
+		return -ENOMEM;
+	if (WARN_ON_ONCE(!n_stats))
+		return -EOPNOTSUPP;
 
 	if (copy_from_user(&stats, useraddr, sizeof(stats)))
 		return -EFAULT;
