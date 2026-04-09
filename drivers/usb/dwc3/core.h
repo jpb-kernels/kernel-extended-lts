@@ -1109,13 +1109,13 @@ struct dwc3 {
 	u32			u1u2;
 	u32			maximum_speed;
 
-	u32			ip;
-
-#define DWC3_IP			0x5533
-#define DWC31_IP		0x3331
-#define DWC32_IP		0x3332
-#define DWC4_IP			0x3430
-
+	/*
+	 * All 3.1 IP version constants are greater than the 3.0 IP
+	 * version constants. This works for most version checks in
+	 * dwc3. However, in the future, this may not apply as
+	 * features may be developed on newer versions of the 3.0 IP
+	 * that are not in the 3.1 IP.
+	 */
 	u32			revision;
 
 #define DWC3_REVISION_173A	0x5533173a
