@@ -1294,8 +1294,6 @@ static int unmap_and_move_huge_page(new_page_t get_new_page,
 	int page_was_mapped = 0;
 	struct page *new_hpage;
 	struct anon_vma *anon_vma = NULL;
-	struct address_space *mapping = NULL;
-	enum ttu_flags ttu = TTU_MIGRATION|TTU_IGNORE_MLOCK;
 
 	/*
 	 * Migratability of hugepages depends on architectures and their size.
@@ -1343,21 +1341,8 @@ static int unmap_and_move_huge_page(new_page_t get_new_page,
 		goto put_anon;
 
 	if (page_mapped(hpage)) {
-		if (!PageAnon(hpage)) {
-			/*
-			 * In shared mappings, try_to_unmap could potentially
-			 * call huge_pmd_unshare.  Because of this, take
-			 * semaphore in write mode here and set TTU_RMAP_LOCKED
-			 * to let lower levels know we have taken the lock.
-			 */
-			mapping = hugetlb_page_mapping_lock_write(hpage);
-			if (unlikely(!mapping))
-				goto unlock_put_anon;
-
-			ttu |= TTU_RMAP_LOCKED;
-		}
-
-		try_to_unmap(hpage, ttu);
+		try_to_unmap(hpage,
+			TTU_MIGRATION|TTU_IGNORE_MLOCK|TTU_IGNORE_ACCESS);
 		page_was_mapped = 1;
 	}
 
@@ -1366,13 +1351,8 @@ static int unmap_and_move_huge_page(new_page_t get_new_page,
 
 	if (page_was_mapped)
 		remove_migration_ptes(hpage,
-			rc == MIGRATEPAGE_SUCCESS ? new_hpage : hpage,
-				(ttu & TTU_RMAP_LOCKED) ? true : false);
+			rc == MIGRATEPAGE_SUCCESS ? new_hpage : hpage, false);
 
-	if (ttu & TTU_RMAP_LOCKED)
-		i_mmap_unlock_write(mapping);
-
-unlock_put_anon:
 	unlock_page(new_hpage);
 
 put_anon:
