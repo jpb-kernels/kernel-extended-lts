@@ -480,10 +480,10 @@ static ssize_t set_temp(struct device *dev, struct device_attribute *attr,
 		val = (temp - val) / 1000;
 
 		if (sattr->index != 1) {
-			data->temp[HYSTERSIS][sattr->index] &= 0xF0;
+			data->temp[HYSTERSIS][sattr->index] &= 0x0F;
 			data->temp[HYSTERSIS][sattr->index] |= (val & 0xF) << 4;
 		} else {
-			data->temp[HYSTERSIS][sattr->index] &= 0x0F;
+			data->temp[HYSTERSIS][sattr->index] &= 0xF0;
 			data->temp[HYSTERSIS][sattr->index] |= (val & 0xF);
 		}
 
@@ -528,6 +528,88 @@ static ssize_t set_temp(struct device *dev, struct device_attribute *attr,
 	i2c_smbus_write_byte_data(client, reg, out);
 
 	mutex_unlock(&data->lock);
+	return count;
+}
+
+/* Assuming CONFIG6[SLOW] is 0 */
+static const int ad7475_st_map[] = {
+	37500, 18800, 12500, 7500, 4700, 3100, 1600, 800,
+};
+
+static ssize_t show_temp_st(struct device *dev, struct device_attribute *attr,
+				  char *buf)
+{
+	struct sensor_device_attribute_2 *sattr = to_sensor_dev_attr_2(attr);
+	struct i2c_client *client = to_i2c_client(dev);
+	struct adt7475_data *data = i2c_get_clientdata(client);
+	long val;
+
+	switch (sattr->index) {
+	case 0:
+		val = data->enh_acoustics[0] & 0xf;
+		break;
+	case 1:
+		val = data->enh_acoustics[1] & 0xf;
+		break;
+	case 2:
+	default:
+		val = (data->enh_acoustics[1] >> 4) & 0xf;
+		break;
+	}
+
+	if (val & 0x8)
+		return sprintf(buf, "%d\n", ad7475_st_map[val & 0x7]);
+	else
+		return sprintf(buf, "0\n");
+}
+
+static ssize_t set_temp_st(struct device *dev, struct device_attribute *attr,
+				 const char *buf, size_t count)
+{
+	struct sensor_device_attribute_2 *sattr = to_sensor_dev_attr_2(attr);
+	struct i2c_client *client = to_i2c_client(dev);
+	struct adt7475_data *data = i2c_get_clientdata(client);
+	unsigned char reg;
+	int shift, idx;
+	ulong val;
+
+	if (kstrtoul(buf, 10, &val))
+		return -EINVAL;
+
+	switch (sattr->index) {
+	case 0:
+		reg = REG_ENHANCE_ACOUSTICS1;
+		shift = 0;
+		idx = 0;
+		break;
+	case 1:
+		reg = REG_ENHANCE_ACOUSTICS2;
+		shift = 0;
+		idx = 1;
+		break;
+	case 2:
+	default:
+		reg = REG_ENHANCE_ACOUSTICS2;
+		shift = 4;
+		idx = 1;
+		break;
+	}
+
+	if (val > 0) {
+		val = find_closest_descending(val, ad7475_st_map,
+					      ARRAY_SIZE(ad7475_st_map));
+		val |= 0x8;
+	}
+
+	mutex_lock(&data->lock);
+
+	data->enh_acoustics[idx] &= ~(0xf << shift);
+	data->enh_acoustics[idx] |= (val << shift);
+
+	i2c_smbus_write_byte_data(client, reg, data->enh_acoustics[idx]);
+
+	mutex_unlock(&data->lock);
+
 	return count;
 }
 

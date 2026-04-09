@@ -4559,7 +4559,33 @@ EXPORT_SYMBOL_GPL(ring_buffer_alloc_read_page);
  */
 void ring_buffer_free_read_page(struct ring_buffer *buffer, void *data)
 {
-	free_page((unsigned long)data);
+	struct ring_buffer_per_cpu *cpu_buffer;
+	struct buffer_data_page *bpage = data;
+	struct page *page = virt_to_page(bpage);
+	unsigned long flags;
+
+	if (!buffer || !buffer->buffers || !buffer->buffers[cpu])
+		return;
+
+	cpu_buffer = buffer->buffers[cpu];
+
+	/* If the page is still in use someplace else, we can't reuse it */
+	if (page_ref_count(page) > 1)
+		goto out;
+
+	local_irq_save(flags);
+	arch_spin_lock(&cpu_buffer->lock);
+
+	if (!cpu_buffer->free_page) {
+		cpu_buffer->free_page = bpage;
+		bpage = NULL;
+	}
+
+	arch_spin_unlock(&cpu_buffer->lock);
+	local_irq_restore(flags);
+
+ out:
+	free_page((unsigned long)bpage);
 }
 EXPORT_SYMBOL_GPL(ring_buffer_free_read_page);
 

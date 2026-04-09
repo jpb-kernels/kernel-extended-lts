@@ -2062,94 +2062,20 @@ static void process_deferred_writethrough_bios(struct cache *cache)
 	bio_list_init(&cache->deferred_writethrough_bios);
 	spin_unlock_irqrestore(&cache->lock, flags);
 
-	/*
-	 * These bios have already been through inc_ds()
-	 */
-	while ((bio = bio_list_pop(&bios)))
-		accounted_request(cache, bio);
-}
+	while ((bio = bio_list_pop(&bios))) {
+		if (bio->bi_opf & REQ_PREFLUSH)
+			commit_needed = process_flush_bio(cache, bio) || commit_needed;
 
-static void writeback_some_dirty_blocks(struct cache *cache)
-{
-	bool prealloc_used = false;
-	dm_oblock_t oblock;
-	dm_cblock_t cblock;
-	struct prealloc structs;
-	struct dm_bio_prison_cell *old_ocell;
-	bool busy = !iot_idle_for(&cache->origin_tracker, HZ);
+		else if (bio_op(bio) == REQ_OP_DISCARD)
+			commit_needed = process_discard_bio(cache, bio) || commit_needed;
 
-	memset(&structs, 0, sizeof(structs));
-
-	while (spare_migration_bandwidth(cache)) {
-		if (policy_writeback_work(cache->policy, &oblock, &cblock, busy))
-			break; /* no work to do */
-
-		prealloc_used = true;
-		if (prealloc_data_structs(cache, &structs) ||
-		    get_cell(cache, oblock, &structs, &old_ocell)) {
-			policy_set_dirty(cache->policy, oblock);
-			break;
-		}
-
-		writeback(cache, &structs, oblock, cblock, old_ocell);
+		else
+			commit_needed = process_bio(cache, bio) || commit_needed;
+		cond_resched();
 	}
 
-	if (prealloc_used)
-		prealloc_free_structs(cache, &structs);
-}
-
-/*----------------------------------------------------------------
- * Invalidations.
- * Dropping something from the cache *without* writing back.
- *--------------------------------------------------------------*/
-
-static void process_invalidation_request(struct cache *cache, struct invalidation_request *req)
-{
-	int r = 0;
-	uint64_t begin = from_cblock(req->cblocks->begin);
-	uint64_t end = from_cblock(req->cblocks->end);
-
-	while (begin != end) {
-		r = policy_remove_cblock(cache->policy, to_cblock(begin));
-		if (!r) {
-			r = dm_cache_remove_mapping(cache->cmd, to_cblock(begin));
-			if (r) {
-				metadata_operation_failed(cache, "dm_cache_remove_mapping", r);
-				break;
-			}
-
-		} else if (r == -ENODATA) {
-			/* harmless, already unmapped */
-			r = 0;
-
-		} else {
-			DMERR("%s: policy_remove_cblock failed", cache_device_name(cache));
-			break;
-		}
-
-		begin++;
-        }
-
-	cache->commit_requested = true;
-
-	req->err = r;
-	atomic_set(&req->complete, 1);
-
-	wake_up(&req->result_wait);
-}
-
-static void process_invalidation_requests(struct cache *cache)
-{
-	struct list_head list;
-	struct invalidation_request *req, *tmp;
-
-	INIT_LIST_HEAD(&list);
-	spin_lock(&cache->invalidation_lock);
-	list_splice_init(&cache->invalidation_requests, &list);
-	spin_unlock(&cache->invalidation_lock);
-
-	list_for_each_entry_safe (req, tmp, &list, list)
-		process_invalidation_request(cache, req);
+	if (commit_needed)
+		schedule_commit(&cache->committer);
 }
 
 /*----------------------------------------------------------------
@@ -2223,6 +2149,7 @@ static void requeue_deferred_bios(struct cache *cache)
 	while ((bio = bio_list_pop(&bios))) {
 		bio->bi_error = DM_ENDIO_REQUEUE;
 		bio_endio(bio);
+		cond_resched();
 	}
 }
 
@@ -2285,20 +2212,32 @@ static void do_waker(struct work_struct *ws)
 	queue_delayed_work(cache->wq, &cache->waker, COMMIT_PERIOD);
 }
 
-/*----------------------------------------------------------------*/
-
-static int is_congested(struct dm_dev *dev, int bdi_bits)
+static void check_migrations(struct work_struct *ws)
 {
-	struct request_queue *q = bdev_get_queue(dev->bdev);
-	return bdi_congested(&q->backing_dev_info, bdi_bits);
-}
+	int r;
+	struct policy_work *op;
+	struct cache *cache = container_of(ws, struct cache, migration_worker);
+	enum busy b;
 
-static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
-{
-	struct cache *cache = container_of(cb, struct cache, callbacks);
+	for (;;) {
+		b = spare_migration_bandwidth(cache);
 
-	return is_congested(cache->origin_dev, bdi_bits) ||
-		is_congested(cache->cache_dev, bdi_bits);
+		r = policy_get_background_work(cache->policy, b == IDLE, &op);
+		if (r == -ENODATA)
+			break;
+
+		if (r) {
+			DMERR_LIMIT("%s: policy_background_work failed",
+				    cache_device_name(cache));
+			break;
+		}
+
+		r = mg_start(cache, op, NULL);
+		if (r)
+			break;
+
+		cond_resched();
+	}
 }
 
 /*----------------------------------------------------------------
