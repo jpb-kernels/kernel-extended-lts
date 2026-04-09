@@ -294,14 +294,49 @@ int hfi1_user_exp_rcv_free(struct hfi1_filedata *fd)
  * of the WC performance improvements. The HFI will ignore this
  * write to the RcvArray entry.
  */
-static inline void rcv_array_wc_fill(struct hfi1_devdata *dd, u32 index)
+static int pin_rcv_pages(struct hfi1_filedata *fd, struct tid_user_buf *tidbuf)
 {
+	int pinned;
+	unsigned int npages = tidbuf->npages;
+	unsigned long vaddr = tidbuf->vaddr;
+	struct page **pages = NULL;
+	struct hfi1_devdata *dd = fd->uctxt->dd;
+
+	if (npages > fd->uctxt->expected_count) {
+		dd_dev_err(dd, "Expected buffer too big\n");
+		return -EINVAL;
+	}
+
+	/* Verify that access is OK for the user buffer */
+	if (!access_ok(VERIFY_WRITE, (void __user *)vaddr,
+		       npages * PAGE_SIZE)) {
+		dd_dev_err(dd, "Fail vaddr %p, %u pages, !access_ok\n",
+			   (void *)vaddr, npages);
+		return -EFAULT;
+	}
+	/* Allocate the array of struct page pointers needed for pinning */
+	pages = kcalloc(npages, sizeof(*pages), GFP_KERNEL);
+	if (!pages)
+		return -ENOMEM;
+
 	/*
-	 * Doing the WC fill writes only makes sense if the device is
-	 * present and the RcvArray has been mapped as WC memory.
+	 * Pin all the pages of the user buffer. If we can't pin all the
+	 * pages, accept the amount pinned so far and program only that.
+	 * User space knows how to deal with partially programmed buffers.
 	 */
-	if ((dd->flags & HFI1_PRESENT) && dd->rcvarray_wc)
-		writeq(0, dd->rcvarray_wc + (index * 8));
+	if (!hfi1_can_pin_pages(dd, fd->mm, fd->tid_n_pinned, npages)) {
+		kfree(pages);
+		return -ENOMEM;
+	}
+
+	pinned = hfi1_acquire_user_pages(fd->mm, vaddr, npages, true, pages);
+	if (pinned <= 0) {
+		kfree(pages);
+		return pinned;
+	}
+	tidbuf->pages = pages;
+	fd->tid_n_pinned += pinned;
+	return pinned;
 }
 
 /*
@@ -373,22 +408,17 @@ int hfi1_user_exp_rcv_setup(struct file *fp, struct hfi1_tid_info *tinfo)
 	if (tinfo->length == 0)
 		return -EINVAL;
 
-	if (npages > uctxt->expected_count) {
-		dd_dev_err(dd, "Expected buffer too big\n");
-		return -EINVAL;
-	}
+	tidbuf = kzalloc(sizeof(*tidbuf), GFP_KERNEL);
+	if (!tidbuf)
+		return -ENOMEM;
 
-	/* Verify that access is OK for the user buffer */
-	if (!access_ok(VERIFY_WRITE, (void __user *)vaddr,
-		       npages * PAGE_SIZE)) {
-		dd_dev_err(dd, "Fail vaddr %p, %u pages, !access_ok\n",
-			   (void *)vaddr, npages);
-		return -EFAULT;
-	}
-
-	pagesets = kcalloc(uctxt->expected_count, sizeof(*pagesets),
-			   GFP_KERNEL);
-	if (!pagesets)
+	tidbuf->vaddr = tinfo->vaddr;
+	tidbuf->length = tinfo->length;
+	tidbuf->npages = num_user_pages(tidbuf->vaddr, tidbuf->length);
+	tidbuf->psets = kcalloc(uctxt->expected_count, sizeof(*tidbuf->psets),
+				GFP_KERNEL);
+	if (!tidbuf->psets) {
+		kfree(tidbuf);
 		return -ENOMEM;
 
 	/* Allocate the array of struct page pointers needed for pinning */
