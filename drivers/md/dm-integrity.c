@@ -2015,6 +2015,21 @@ offload_to_thread:
 			}
 		}
 	}
+	if (ic->mode == 'J' && likely(dio->op == REQ_OP_DISCARD) && !discard_retried) {
+		sector_t next_sector;
+		unsigned new_pos = find_journal_node(ic, dio->range.logical_sector, &next_sector);
+		if (unlikely(new_pos != NOT_FOUND) ||
+		    unlikely(next_sector < dio->range.logical_sector + dio->range.n_sectors)) {
+			remove_range_unlocked(ic, &dio->range);
+			spin_unlock_irq(&ic->endio_wait.lock);
+			queue_work(ic->commit_wq, &ic->commit_work);
+			flush_workqueue(ic->commit_wq);
+			queue_work(ic->writer_wq, &ic->writer_work);
+			flush_workqueue(ic->writer_wq);
+			discard_retried = true;
+			goto lock_retry;
+		}
+	}
 	spin_unlock_irq(&ic->endio_wait.lock);
 
 	if (unlikely(journal_read_pos != NOT_FOUND)) {

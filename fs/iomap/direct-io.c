@@ -259,9 +259,14 @@ iomap_dio_bio_actor(struct inode *inode, loff_t pos, loff_t length,
 
 	do {
 		size_t n;
-		if (dio->error) {
-			iov_iter_revert(dio->submit.iter, copied);
-			return 0;
+
+		/*
+		 * If completions already occurred and reported errors, give up now and
+		 * don't bother submitting more bios.
+		 */
+		if (unlikely(data_race(dio->error))) {
+			ret = 0;
+			goto out;
 		}
 
 		bio = bio_alloc(GFP_KERNEL, nr_pages);

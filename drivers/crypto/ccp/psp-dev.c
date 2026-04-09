@@ -1031,6 +1031,17 @@ int sev_issue_cmd_external_user(struct file *filep, unsigned int cmd,
 }
 EXPORT_SYMBOL_GPL(sev_issue_cmd_external_user);
 
+int psp_restore(struct sp_device *sp)
+{
+	struct psp_device *psp = sp->psp_data;
+	int ret = 0;
+
+	if (psp->tee_data)
+		ret = tee_restore(psp);
+
+	return ret;
+}
+
 void psp_pci_init(void)
 {
 	struct sp_device *sp;

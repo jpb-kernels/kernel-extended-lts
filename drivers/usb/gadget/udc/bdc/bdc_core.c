@@ -32,19 +32,14 @@
 static int poll_oip(struct bdc *bdc, int usec)
 {
 	u32 status;
-	/* Poll till STS!= OIP */
-	while (usec) {
-		status = bdc_readl(bdc->regs, BDC_BDCSC);
-		if (BDC_CSTS(status) != BDC_OIP) {
-			dev_dbg(bdc->dev,
-				"poll_oip complete status=%d",
-				BDC_CSTS(status));
-			return 0;
-		}
-		udelay(10);
-		usec -= 10;
-	}
-	dev_err(bdc->dev, "Err: operation timedout BDCSC: 0x%08x\n", status);
+	int ret;
+
+	ret = readl_poll_timeout_atomic(bdc->regs + BDC_BDCSC, status,
+					(BDC_CSTS(status) != BDC_OIP), 10, usec);
+	if (ret)
+		dev_err(bdc->dev, "operation timedout BDCSC: 0x%08x\n", status);
+	else
+		dev_dbg(bdc->dev, "%s complete status=%d", __func__, BDC_CSTS(status));
 
 	return -ETIMEDOUT;
 }

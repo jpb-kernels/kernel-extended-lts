@@ -264,7 +264,13 @@ static int sp_pci_resume(struct pci_dev *pdev)
 
 	return sp_resume(sp);
 }
-#endif
+
+static int __maybe_unused sp_pci_restore(struct device *dev)
+{
+	struct sp_device *sp = dev_get_drvdata(dev);
+
+	return sp_restore(sp);
+}
 
 #ifdef CONFIG_CRYPTO_DEV_SP_PSP
 static const struct psp_vdata pspv1 = {
@@ -327,6 +333,15 @@ static const struct pci_device_id sp_pci_table[] = {
 	{ 0, }
 };
 MODULE_DEVICE_TABLE(pci, sp_pci_table);
+
+static const struct dev_pm_ops sp_pci_pm_ops = {
+	.suspend = pm_sleep_ptr(sp_pci_suspend),
+	.resume = pm_sleep_ptr(sp_pci_resume),
+	.freeze = pm_sleep_ptr(sp_pci_suspend),
+	.thaw = pm_sleep_ptr(sp_pci_resume),
+	.poweroff = pm_sleep_ptr(sp_pci_suspend),
+	.restore_early = pm_sleep_ptr(sp_pci_restore),
+};
 
 static struct pci_driver sp_pci_driver = {
 	.name = "ccp",

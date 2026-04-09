@@ -4564,17 +4564,19 @@ nfs4svc_decode_compoundargs(struct svc_rqst *rqstp, __be32 *p)
 	args->ops = args->iops;
 	args->rqstp = rqstp;
 
-	return !nfsd4_decode_compound(args);
+	return nfsd4_decode_compound(args);
 }
 
 int
 nfs4svc_encode_compoundres(struct svc_rqst *rqstp, __be32 *p)
 {
+	struct nfsd4_compoundres *resp = rqstp->rq_resp;
+	__be32 *p;
+
 	/*
 	 * All that remains is to write the tag and operation count...
 	 */
-	struct nfsd4_compoundres *resp = rqstp->rq_resp;
-	struct xdr_buf *buf = resp->xdr.buf;
+	p = resp->statusp;
 
 	WARN_ON_ONCE(buf->len != buf->head[0].iov_len + buf->page_len +
 				 buf->tail[0].iov_len);
