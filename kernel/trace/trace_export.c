@@ -41,17 +41,8 @@ static int ftrace_event_register(struct trace_event_call *call,
 #undef __field
 #define __field(type, item)				type item;
 
-#undef __field_fn
-#define __field_fn(type, item)				type item;
-
-#undef __field_packed
-#define __field_packed(type, item)			type item;
-
 #undef __field_desc
 #define __field_desc(type, container, item)		type item;
-
-#undef __field_desc_packed
-#define __field_desc_packed(type, container, item)	type item;
 
 #undef __array
 #define __array(type, item, size)			type item[size];
@@ -89,19 +80,23 @@ static void __always_unused ____ftrace_check_##name(void)		\
 #include "trace_entries.h"
 
 #undef __field
-#define __field(_type, _item) __field_ext(_type, _item, FILTER_OTHER)
-
-#undef __field_fn
-#define __field_fn(_type, _item) __field_ext(_type, _item, FILTER_TRACE_FN)
-
-#undef __field_packed
-#define __field_packed(_type, _item) __field_ext_packed(_type, _item, FILTER_OTHER)
+#define __field(type, item)						\
+	ret = trace_define_field(event_call, #type, #item,		\
+				 offsetof(typeof(field), item),		\
+				 sizeof(field.item),			\
+				 is_signed_type(type), filter_type);	\
+	if (ret)							\
+		return ret;
 
 #undef __field_desc
-#define __field_desc(_type, _container, _item) __field_ext(_type, _item, FILTER_OTHER)
-
-#undef __field_desc_packed
-#define __field_desc_packed(_type, _container, _item) __field_ext_packed(_type, _item, FILTER_OTHER)
+#define __field_desc(type, container, item)	\
+	ret = trace_define_field(event_call, #type, #item,		\
+				 offsetof(typeof(field),		\
+					  container.item),		\
+				 sizeof(field.container.item),		\
+				 is_signed_type(type), filter_type);	\
+	if (ret)							\
+		return ret;
 
 #undef __array
 #define __array(type, item, len)					\
@@ -157,17 +152,8 @@ ftrace_define_fields_##name(struct trace_event_call *event_call)	\
 #undef __field
 #define __field(type, item)
 
-#undef __field_fn
-#define __field_fn(type, item)
-
-#undef __field_packed
-#define __field_packed(type, item)
-
 #undef __field_desc
 #define __field_desc(type, container, item)
-
-#undef __field_desc_packed
-#define __field_desc_packed(type, container, item)
 
 #undef __array
 #define __array(type, item, len)
