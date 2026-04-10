@@ -2486,16 +2486,6 @@ static int fbcon_copy_font(struct vc_data *vc, int con)
 	return fbcon_do_set_font(vc, f->width, f->height, od->fontdata, od->userfont);
 }
 
-static int fbcon_copy_font(struct vc_data *vc, int con)
-{
-	struct fbcon_display *od = &fb_display[con];
-	struct console_font *f = &vc->vc_font;
-
-	if (od->fontdata == f->data)
-		return 0;	/* already the same font... */
-	return fbcon_do_set_font(vc, f->width, f->height, od->fontdata, od->userfont);
-}
-
 /*
  *  User asked to set font; we are guaranteed that
  *	a) width and height are in range 1..32
