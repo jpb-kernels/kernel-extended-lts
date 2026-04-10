@@ -1102,6 +1102,22 @@ static int zynqmp_qspi_probe(struct platform_device *pdev)
 	if (ret)
 		goto clk_dis_all;
 
+	ctlr->bits_per_word_mask = SPI_BPW_MASK(8);
+	ctlr->num_chipselect = GQSPI_DEFAULT_NUM_CS;
+	ctlr->mem_ops = &zynqmp_qspi_mem_ops;
+	ctlr->setup = zynqmp_qspi_setup_op;
+	ctlr->max_speed_hz = clk_get_rate(xqspi->refclk) / 2;
+	ctlr->bits_per_word_mask = SPI_BPW_MASK(8);
+	ctlr->mode_bits = SPI_CPOL | SPI_CPHA | SPI_RX_DUAL | SPI_RX_QUAD |
+			    SPI_TX_DUAL | SPI_TX_QUAD;
+	ctlr->dev.of_node = np;
+
+	ret = spi_register_controller(ctlr);
+	if (ret) {
+		dev_err(&pdev->dev, "spi_register_controller failed\n");
+		goto clk_dis_all;
+	}
+
 	return 0;
 
 clk_dis_all:
@@ -1130,6 +1146,8 @@ static int zynqmp_qspi_remove(struct platform_device *pdev)
 {
 	struct spi_master *master = platform_get_drvdata(pdev);
 	struct zynqmp_qspi *xqspi = spi_master_get_devdata(master);
+
+	spi_unregister_controller(xqspi->ctlr);
 
 	zynqmp_gqspi_write(xqspi, GQSPI_EN_OFST, 0x0);
 	clk_disable_unprepare(xqspi->refclk);
