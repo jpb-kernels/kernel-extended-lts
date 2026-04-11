@@ -218,8 +218,8 @@ void nf_conncount_list_init(struct nf_conncount_list *list)
 EXPORT_SYMBOL_GPL(nf_conncount_list_init);
 
 /* Return true if the list is empty. Must be called with BH disabled. */
-static bool __nf_conncount_gc_list(struct net *net,
-				   struct nf_conncount_list *list)
+bool nf_conncount_gc_list(struct net *net,
+			  struct nf_conncount_list *list)
 {
 	const struct nf_conntrack_tuple_hash *found;
 	struct nf_conncount_tuple *conn, *conn_n;
@@ -227,8 +227,8 @@ static bool __nf_conncount_gc_list(struct net *net,
 	unsigned int collected = 0;
 	bool ret = false;
 
-	/* don't bother if we just did GC */
-	if ((u32)jiffies == READ_ONCE(list->last_gc))
+	/* don't bother if other cpu is already doing GC */
+	if (!spin_trylock(&list->list_lock))
 		return false;
 
 	list_for_each_entry_safe(conn, conn_n, &list->head, node) {
@@ -258,22 +258,7 @@ static bool __nf_conncount_gc_list(struct net *net,
 
 	if (!list->count)
 		ret = true;
-	list->last_gc = (u32)jiffies;
-
-	return ret;
-}
-
-bool nf_conncount_gc_list(struct net *net,
-			  struct nf_conncount_list *list)
-{
-	bool ret;
-
-	/* don't bother if other cpu is already doing GC */
-	if (!spin_trylock_bh(&list->list_lock))
-		return false;
-
-	ret = __nf_conncount_gc_list(net, list);
-	spin_unlock_bh(&list->list_lock);
+	spin_unlock(&list->list_lock);
 
 	return ret;
 }
