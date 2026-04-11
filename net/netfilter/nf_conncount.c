@@ -34,9 +34,8 @@
 
 #define CONNCOUNT_SLOTS		256U
 
-#define CONNCOUNT_GC_MAX_NODES		8
-#define CONNCOUNT_GC_MAX_COLLECT	64
-#define MAX_KEYLEN			5
+#define CONNCOUNT_GC_MAX_NODES	8
+#define MAX_KEYLEN		5
 
 /* we will save the tuples of all connections we care about */
 struct nf_conncount_tuple {
@@ -132,24 +131,10 @@ static int __nf_conncount_add(struct net *net,
 	struct nf_conncount_tuple *conn, *conn_n;
 	struct nf_conn *found_ct;
 	unsigned int collect = 0;
-	bool refcounted = false;
-	int err = 0;
-
-	if (!get_ct_or_tuple_from_skb(net, skb, l3num, &ct, &tuple, &zone, &refcounted))
-		return -ENOENT;
-
-	if (ct && nf_ct_is_confirmed(ct)) {
-		err = -EEXIST;
-		goto out_put;
-	}
-
-	if ((u32)jiffies == list->last_gc &&
-	    (list->count - list->last_gc_count) < CONNCOUNT_GC_MAX_COLLECT)
-		goto add_new_node;
 
 	/* check the saved connections */
 	list_for_each_entry_safe(conn, conn_n, &list->head, node) {
-		if (collect > CONNCOUNT_GC_MAX_COLLECT)
+		if (collect > CONNCOUNT_GC_MAX_NODES)
 			break;
 
 		found = find_or_evict(net, list, conn);
@@ -191,14 +176,9 @@ static int __nf_conncount_add(struct net *net,
 
 		nf_ct_put(found_ct);
 	}
-	list->last_gc = (u32)jiffies;
-	list->last_gc_count = list->count;
 
-add_new_node:
-	if (WARN_ON_ONCE(list->count > INT_MAX)) {
-		err = -EOVERFLOW;
-		goto out_put;
-	}
+	if (WARN_ON_ONCE(list->count > INT_MAX))
+		return -EOVERFLOW;
 
 	conn = kmem_cache_alloc(conncount_conn_cachep, GFP_ATOMIC);
 	if (conn == NULL)
@@ -234,8 +214,6 @@ void nf_conncount_list_init(struct nf_conncount_list *list)
 	spin_lock_init(&list->list_lock);
 	INIT_LIST_HEAD(&list->head);
 	list->count = 0;
-	list->last_gc_count = 0;
-	list->last_gc = (u32)jiffies;
 }
 EXPORT_SYMBOL_GPL(nf_conncount_list_init);
 
@@ -274,14 +252,13 @@ static bool __nf_conncount_gc_list(struct net *net,
 		}
 
 		nf_ct_put(found_ct);
-		if (collected > CONNCOUNT_GC_MAX_COLLECT)
+		if (collected > CONNCOUNT_GC_MAX_NODES)
 			break;
 	}
 
 	if (!list->count)
 		ret = true;
 	list->last_gc = (u32)jiffies;
-	list->last_gc_count = list->count;
 
 	return ret;
 }
