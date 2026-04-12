@@ -17,6 +17,9 @@
 #include <assert.h>
 #include <errno.h>
 
+#include "../kselftest.h"
+#include "current_stack_pointer.h"
+
 #ifndef SS_AUTODISARM
 #define SS_AUTODISARM  (1U << 31)
 #endif

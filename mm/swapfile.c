@@ -491,6 +491,82 @@ new_cluster:
 	cluster->next = tmp + 1;
 	*offset = tmp;
 	*scan_base = tmp;
+	return found_free;
+}
+
+static void __del_from_avail_list(struct swap_info_struct *p)
+{
+	int nid;
+
+	assert_spin_locked(&p->lock);
+	for_each_node(nid)
+		plist_del(&p->avail_lists[nid], &swap_avail_heads[nid]);
+}
+
+static void del_from_avail_list(struct swap_info_struct *p)
+{
+	spin_lock(&swap_avail_lock);
+	__del_from_avail_list(p);
+	spin_unlock(&swap_avail_lock);
+}
+
+static void swap_range_alloc(struct swap_info_struct *si, unsigned long offset,
+			     unsigned int nr_entries)
+{
+	unsigned int end = offset + nr_entries - 1;
+
+	if (offset == si->lowest_bit)
+		si->lowest_bit += nr_entries;
+	if (end == si->highest_bit)
+		si->highest_bit -= nr_entries;
+	si->inuse_pages += nr_entries;
+	if (si->inuse_pages == si->pages) {
+		si->lowest_bit = si->max;
+		si->highest_bit = 0;
+		del_from_avail_list(si);
+	}
+}
+
+static void add_to_avail_list(struct swap_info_struct *p)
+{
+	int nid;
+
+	spin_lock(&swap_avail_lock);
+	for_each_node(nid) {
+		WARN_ON(!plist_node_empty(&p->avail_lists[nid]));
+		plist_add(&p->avail_lists[nid], &swap_avail_heads[nid]);
+	}
+	spin_unlock(&swap_avail_lock);
+}
+
+static void swap_range_free(struct swap_info_struct *si, unsigned long offset,
+			    unsigned int nr_entries)
+{
+	unsigned long end = offset + nr_entries - 1;
+	void (*swap_slot_free_notify)(struct block_device *, unsigned long);
+
+	if (offset < si->lowest_bit)
+		si->lowest_bit = offset;
+	if (end > si->highest_bit) {
+		bool was_full = !si->highest_bit;
+
+		si->highest_bit = end;
+		if (was_full && (si->flags & SWP_WRITEOK))
+			add_to_avail_list(si);
+	}
+	atomic_long_add(nr_entries, &nr_swap_pages);
+	si->inuse_pages -= nr_entries;
+	if (si->flags & SWP_BLKDEV)
+		swap_slot_free_notify =
+			si->bdev->bd_disk->fops->swap_slot_free_notify;
+	else
+		swap_slot_free_notify = NULL;
+	while (offset <= end) {
+		frontswap_invalidate_page(si->type, offset);
+		if (swap_slot_free_notify)
+			swap_slot_free_notify(si->bdev, offset);
+		offset++;
+	}
 }
 
 static unsigned long scan_swap_map(struct swap_info_struct *si,
@@ -1909,6 +1985,7 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	plist_del(&p->avail_list, &swap_avail_head);
 	spin_unlock(&swap_avail_lock);
 	spin_lock(&p->lock);
+	del_from_avail_list(p);
 	if (p->prio < 0) {
 		struct swap_info_struct *si = p;
 
