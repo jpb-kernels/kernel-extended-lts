@@ -6995,8 +6995,11 @@ static void i40e_reset_and_rebuild(struct i40e_pf *pf, bool reinit)
 					     pf->hw.aq.asq_last_status));
 	}
 	/* reinit the misc interrupt */
-	if (pf->flags & I40E_FLAG_MSIX_ENABLED)
+	if (pf->flags & I40E_FLAG_MSIX_ENABLED) {
 		ret = i40e_setup_misc_vector(pf);
+		if (ret)
+			goto end_unlock;
+	}
 
 	/* Add a filter to drop all Flow control frames from any VSI from being
 	 * transmitted. By doing so we stop a malicious VF from sending out
@@ -9554,6 +9557,7 @@ static int i40e_add_vsi(struct i40e_vsi *vsi)
 		f_count++;
 	}
 	spin_unlock_bh(&vsi->mac_filter_list_lock);
+	clear_bit(__I40E_VSI_OVERFLOW_PROMISC, vsi->state);
 
 	if (f_count) {
 		vsi->flags |= I40E_VSI_FLAG_FILTER_CHANGED;
