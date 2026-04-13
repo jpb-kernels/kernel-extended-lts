@@ -602,8 +602,18 @@ static void cake_update_flowkeys(struct flow_keys *keys,
 	keys->addrs.v4addrs.dst = rev ? tuple.src.u3.ip : tuple.dst.u3.ip;
 
 	if (keys->ports.ports) {
-		keys->ports.src = rev ? tuple.dst.u.all : tuple.src.u.all;
-		keys->ports.dst = rev ? tuple.src.u.all : tuple.dst.u.all;
+		__be16 port;
+
+		port = rev ? tuple.dst.u.all : tuple.src.u.all;
+		if (port != keys->ports.src) {
+			keys->ports.src = port;
+			upd = true;
+		}
+		port = rev ? tuple.src.u.all : tuple.dst.u.all;
+		if (port != keys->ports.dst) {
+			keys->ports.dst = port;
+			upd = true;
+		}
 	}
 #endif
 }
