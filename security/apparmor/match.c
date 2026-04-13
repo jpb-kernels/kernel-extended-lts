@@ -204,9 +204,30 @@ static int verify_dfa(struct aa_dfa *dfa)
 	if (state_count == 0)
 		goto out;
 	for (i = 0; i < state_count; i++) {
-		if (!(BASE_TABLE(dfa)[i] & MATCH_FLAG_DIFF_ENCODE) &&
-		    (DEFAULT_TABLE(dfa)[i] >= state_count))
+		if (DEFAULT_TABLE(dfa)[i] >= state_count) {
+			pr_err("AppArmor DFA default state out of bounds");
 			goto out;
+		}
+		if (BASE_TABLE(dfa)[i] & MATCH_FLAGS_INVALID) {
+			pr_err("AppArmor DFA state with invalid match flags");
+			goto out;
+		}
+		if ((BASE_TABLE(dfa)[i] & MATCH_FLAG_DIFF_ENCODE)) {
+			if (!(dfa->flags & YYTH_FLAG_DIFF_ENCODE)) {
+				pr_err("AppArmor DFA diff encoded transition state without header flag");
+				goto out;
+			}
+		}
+		if ((BASE_TABLE(dfa)[i] & MATCH_FLAG_OOB_TRANSITION)) {
+			if (base_idx(BASE_TABLE(dfa)[i]) < dfa->max_oob) {
+				pr_err("AppArmor DFA out of bad transition out of range");
+				goto out;
+			}
+			if (!(dfa->flags & YYTH_FLAG_OOB_TRANS)) {
+				pr_err("AppArmor DFA out of bad transition state without header flag");
+				goto out;
+			}
+		}
 		if (base_idx(BASE_TABLE(dfa)[i]) + 255 >= trans_count) {
 			pr_err("AppArmor DFA next/check upper bounds error\n");
 			goto out;
