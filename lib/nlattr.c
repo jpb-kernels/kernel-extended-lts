@@ -324,36 +324,6 @@ static int nla_validate_int_range(const struct nla_policy *pt,
 		WARN_ON(1);
 		return -EINVAL;
 	}
-}
-
-static int nla_validate_mask(const struct nla_policy *pt,
-			     const struct nlattr *nla,
-			     struct netlink_ext_ack *extack)
-{
-	u64 value;
-
-	switch (pt->type) {
-	case NLA_U8:
-		value = nla_get_u8(nla);
-		break;
-	case NLA_U16:
-		value = nla_get_u16(nla);
-		break;
-	case NLA_U32:
-		value = nla_get_u32(nla);
-		break;
-	case NLA_U64:
-		value = nla_get_u64(nla);
-		break;
-	case NLA_BE16:
-		value = ntohs(nla_get_be16(nla));
-		break;
-	case NLA_BE32:
-		value = ntohl(nla_get_be32(nla));
-		break;
-	default:
-		return -EINVAL;
-	}
 
 	if ((validate_min && value < pt->min) ||
 	    (validate_max && value > pt->max)) {
