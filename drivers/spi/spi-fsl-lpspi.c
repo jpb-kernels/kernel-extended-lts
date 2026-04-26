@@ -955,8 +955,14 @@ static int fsl_lpspi_probe(struct platform_device *pdev)
 	if (ret == -EPROBE_DEFER)
 		goto out_controller_put;
 
-	if (ret < 0)
-		dev_err(&pdev->dev, "dma setup error %d, use pio\n", ret);
+	ret = spi_register_controller(controller);
+	if (ret < 0) {
+		dev_err_probe(&pdev->dev, ret, "spi_register_controller error\n");
+		goto free_dma;
+	}
+
+	pm_runtime_mark_last_busy(fsl_lpspi->dev);
+	pm_runtime_put_autosuspend(fsl_lpspi->dev);
 
 	return 0;
 
@@ -972,6 +978,10 @@ static int fsl_lpspi_remove(struct platform_device *pdev)
 	struct fsl_lpspi_data *fsl_lpspi =
 				spi_controller_get_devdata(controller);
 
+	spi_unregister_controller(controller);
+	fsl_lpspi_dma_exit(controller);
+
+	pm_runtime_dont_use_autosuspend(fsl_lpspi->dev);
 	pm_runtime_disable(fsl_lpspi->dev);
 	return 0;
 }

@@ -4361,6 +4361,48 @@ static void nand_shutdown(struct mtd_info *mtd)
 	nand_suspend(mtd);
 }
 
+/**
+ * nand_lock - [MTD Interface] Lock the NAND flash
+ * @mtd: MTD device structure
+ * @ofs: offset byte address
+ * @len: number of bytes to lock (must be a multiple of block/page size)
+ */
+static int nand_lock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
+{
+	struct nand_chip *chip = mtd_to_nand(mtd);
+	int ret;
+
+	if (!chip->ops.lock_area)
+		return -ENOTSUPP;
+
+	nand_get_device(chip);
+	ret = chip->ops.lock_area(chip, ofs, len);
+	nand_release_device(chip);
+
+	return ret;
+}
+
+/**
+ * nand_unlock - [MTD Interface] Unlock the NAND flash
+ * @mtd: MTD device structure
+ * @ofs: offset byte address
+ * @len: number of bytes to unlock (must be a multiple of block/page size)
+ */
+static int nand_unlock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
+{
+	struct nand_chip *chip = mtd_to_nand(mtd);
+	int ret;
+
+	if (!chip->ops.unlock_area)
+		return -ENOTSUPP;
+
+	nand_get_device(chip);
+	ret = chip->ops.unlock_area(chip, ofs, len);
+	nand_release_device(chip);
+
+	return ret;
+}
+
 /* Set default functions */
 static void nand_set_defaults(struct nand_chip *chip)
 {

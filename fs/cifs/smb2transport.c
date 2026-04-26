@@ -31,6 +31,7 @@
 #include <asm/processor.h>
 #include <linux/mempool.h>
 #include <linux/highmem.h>
+#include <crypto/algapi.h>
 #include <crypto/aead.h>
 #include "smb2pdu.h"
 #include "cifsglob.h"
@@ -551,7 +552,8 @@ smb2_verify_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 	if (rc)
 		return rc;
 
-	if (memcmp(server_response_sig, shdr->Signature, SMB2_SIGNATURE_SIZE))
+	if (crypto_memneq(server_response_sig, shdr->Signature,
+			  SMB2_SIGNATURE_SIZE))
 		return -EACCES;
 	else
 		return 0;
