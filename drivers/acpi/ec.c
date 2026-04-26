@@ -97,8 +97,6 @@ enum {
 	EC_FLAGS_QUERY_GUARDING,	/* Guard for SCI_EVT check */
 	EC_FLAGS_GPE_HANDLER_INSTALLED,	/* GPE handler installed */
 	EC_FLAGS_EC_HANDLER_INSTALLED,	/* OpReg handler installed */
-	EC_FLAGS_EC_REG_CALLED,		/* OpReg ACPI _REG method called */
-	EC_FLAGS_QUERY_METHODS_INSTALLED, /* _Qxx handlers installed */
 	EC_FLAGS_EVT_HANDLER_INSTALLED, /* _Qxx handlers installed */
 	EC_FLAGS_STARTED,		/* Driver is started */
 	EC_FLAGS_STOPPED,		/* Driver is stopped */
@@ -1469,47 +1467,12 @@ ec_parse_device(acpi_handle handle, u32 Level, void *context, void **retval)
 	return AE_CTRL_TERMINATE;
 }
 
-static bool install_gpe_event_handler(struct acpi_ec *ec)
-{
-	acpi_status status;
-
-	status = acpi_install_gpe_raw_handler(NULL, ec->gpe,
-					      ACPI_GPE_EDGE_TRIGGERED,
-					      &acpi_ec_gpe_handler, ec);
-	if (ACPI_FAILURE(status))
-		return false;
-
-	if (test_bit(EC_FLAGS_STARTED, &ec->flags) && ec->reference_count >= 1)
-		acpi_ec_enable_gpe(ec, true);
-
-	return true;
-}
-
-static bool install_gpio_irq_event_handler(struct acpi_ec *ec)
-{
-	return request_irq(ec->irq, acpi_ec_irq_handler, IRQF_SHARED,
-			   "ACPI EC", ec) >= 0;
-}
-
-/**
- * ec_install_handlers - Install service callbacks and register query methods.
- * @ec: Target EC.
- * @device: ACPI device object corresponding to @ec.
- * @call_reg: If _REG should be called to notify OpRegion availability
- *
- * Install a handler for the EC address space type unless it has been installed
- * already.  If @device is not NULL, also look for EC query methods in the
- * namespace and register them, and install an event (either GPE or GPIO IRQ)
- * handler for the EC, if possible.
- *
- * Return:
- * -ENODEV if the address space handler cannot be installed, which means
- *  "unable to handle transactions",
- * -EPROBE_DEFER if GPIO IRQ acquisition needs to be deferred,
- * or 0 (success) otherwise.
+/*
+ * Note: This function returns an error code only when the address space
+ *       handler is not installed, which means "not able to handle
+ *       transactions".
  */
-static int ec_install_handlers(struct acpi_ec *ec, struct acpi_device *device,
-			       bool call_reg)
+static int ec_install_handlers(struct acpi_ec *ec, bool handle_events)
 {
 	acpi_status status;
 
@@ -1517,10 +1480,10 @@ static int ec_install_handlers(struct acpi_ec *ec, struct acpi_device *device,
 
 	if (!test_bit(EC_FLAGS_EC_HANDLER_INSTALLED, &ec->flags)) {
 		acpi_ec_enter_noirq(ec);
-		status = acpi_install_address_space_handler_no_reg(ec->handle,
-								   ACPI_ADR_SPACE_EC,
-								   &acpi_ec_space_handler,
-								   NULL, ec);
+		status = acpi_install_address_space_handler(ec->handle,
+							    ACPI_ADR_SPACE_EC,
+							    &acpi_ec_space_handler,
+							    NULL, ec);
 		if (ACPI_FAILURE(status)) {
 			if (status == AE_NOT_FOUND) {
 				/*
@@ -1538,11 +1501,6 @@ static int ec_install_handlers(struct acpi_ec *ec, struct acpi_device *device,
 		}
 		set_bit(EC_FLAGS_EC_HANDLER_INSTALLED, &ec->flags);
 		ec->address_space_handler_holder = ec->handle;
-	}
-
-	if (call_reg && !test_bit(EC_FLAGS_EC_REG_CALLED, &ec->flags)) {
-		acpi_execute_reg_methods(ec->handle, ACPI_ADR_SPACE_EC);
-		set_bit(EC_FLAGS_EC_REG_CALLED, &ec->flags);
 	}
 
 	if (!handle_events)
@@ -1609,11 +1567,11 @@ static void ec_remove_handlers(struct acpi_ec *ec)
 	}
 }
 
-static int acpi_ec_setup(struct acpi_ec *ec, struct acpi_device *device, bool call_reg)
+static int acpi_ec_setup(struct acpi_ec *ec, bool handle_events)
 {
 	int ret;
 
-	ret = ec_install_handlers(ec, device, call_reg);
+	ret = ec_install_handlers(ec, handle_events);
 	if (ret)
 		return ret;
 
@@ -1689,7 +1647,7 @@ static int acpi_ec_add(struct acpi_device *device)
 		}
 	}
 
-	ret = acpi_ec_setup(ec, device, true);
+	ret = acpi_ec_setup(ec, true);
 	if (ret)
 		goto err_query;
 
@@ -1809,7 +1767,7 @@ void __init acpi_ec_dsdt_probe(void)
 	 * At this point, the GPE is not fully initialized, so do not to
 	 * handle the events.
 	 */
-	ret = acpi_ec_setup(ec, NULL, true);
+	ret = acpi_ec_setup(ec, false);
 	if (ret) {
 		acpi_ec_free(ec);
 		return;
@@ -2005,7 +1963,7 @@ void __init acpi_ec_ecdt_probe(void)
 	 * At this point, the namespace is not initialized, so do not find
 	 * the namespace objects, or handle the events.
 	 */
-	ret = acpi_ec_setup(ec, NULL, false);
+	ret = acpi_ec_setup(ec, false);
 	if (ret) {
 		acpi_ec_free(ec);
 		return;
