@@ -97,60 +97,34 @@ static int nla_validate_array(const struct nlattr *head, int len, int maxtype,
 	return 0;
 }
 
-void nla_get_range_unsigned(const struct nla_policy *pt,
-			    struct netlink_range_validation *range)
+static u64 nla_get_attr_bo(const struct nla_policy *pt,
+			   const struct nlattr *nla)
 {
-	WARN_ON_ONCE(pt->validation_type != NLA_VALIDATE_RANGE_PTR &&
-		     (pt->min < 0 || pt->max < 0));
-
-	range->min = 0;
-
 	switch (pt->type) {
-	case NLA_U8:
-		range->max = U8_MAX;
-		break;
 	case NLA_U16:
-	case NLA_BE16:
-	case NLA_BINARY:
-		range->max = U16_MAX;
-		break;
+		if (pt->network_byte_order)
+			return ntohs(nla_get_be16(nla));
+
+		return nla_get_u16(nla);
 	case NLA_U32:
-	case NLA_BE32:
-		range->max = U32_MAX;
-		break;
+		if (pt->network_byte_order)
+			return ntohl(nla_get_be32(nla));
+
+		return nla_get_u32(nla);
 	case NLA_U64:
-	case NLA_MSECS:
-		range->max = U64_MAX;
-		break;
-	default:
-		WARN_ON_ONCE(1);
-		return;
+		if (pt->network_byte_order)
+			return be64_to_cpu(nla_get_be64(nla));
+
+		return nla_get_u64(nla);
 	}
 
-	switch (pt->validation_type) {
-	case NLA_VALIDATE_RANGE:
-	case NLA_VALIDATE_RANGE_WARN_TOO_LONG:
-		range->min = pt->min;
-		range->max = pt->max;
-		break;
-	case NLA_VALIDATE_RANGE_PTR:
-		*range = *pt->range;
-		break;
-	case NLA_VALIDATE_MIN:
-		range->min = pt->min;
-		break;
-	case NLA_VALIDATE_MAX:
-		range->max = pt->max;
-		break;
-	default:
-		break;
-	}
+	WARN_ON_ONCE(1);
+	return 0;
 }
 
-static int nla_validate_range_unsigned(const struct nla_policy *pt,
-				       const struct nlattr *nla,
-				       struct netlink_ext_ack *extack,
-				       unsigned int validate)
+static int nla_validate_int_range(const struct nla_policy *pt,
+				  const struct nlattr *nla,
+				  struct netlink_ext_ack *extack)
 {
 	bool validate_min, validate_max;
 	s64 value;
@@ -165,25 +139,15 @@ static int nla_validate_range_unsigned(const struct nla_policy *pt,
 		value = nla_get_u8(nla);
 		break;
 	case NLA_U16:
-		value = nla_get_u16(nla);
-		break;
 	case NLA_U32:
-		value = nla_get_u32(nla);
-		break;
 	case NLA_U64:
-		value = nla_get_u64(nla);
+		value = nla_get_attr_bo(pt, nla);
 		break;
 	case NLA_MSECS:
 		value = nla_get_u64(nla);
 		break;
 	case NLA_BINARY:
 		value = nla_len(nla);
-		break;
-	case NLA_BE16:
-		value = ntohs(nla_get_be16(nla));
-		break;
-	case NLA_BE32:
-		value = ntohl(nla_get_be32(nla));
 		break;
 	default:
 		return -EINVAL;
@@ -285,41 +249,15 @@ static int nla_validate_int_range_signed(const struct nla_policy *pt,
 	case NLA_S64:
 		value = nla_get_s64(nla);
 		break;
-	default:
-		return -EINVAL;
-	}
-
-	nla_get_range_signed(pt, &range);
-
-	if (value < range.min || value > range.max) {
-		NL_SET_ERR_MSG_ATTR_POL(extack, nla, pt,
-					"integer out of range");
-		return -ERANGE;
-	}
-
-	return 0;
-}
-
-static int nla_validate_int_range(const struct nla_policy *pt,
-				  const struct nlattr *nla,
-				  struct netlink_ext_ack *extack,
-				  unsigned int validate)
-{
-	switch (pt->type) {
-	case NLA_U8:
-	case NLA_U16:
-	case NLA_U32:
 	case NLA_U64:
-	case NLA_MSECS:
-	case NLA_BINARY:
-	case NLA_BE16:
-	case NLA_BE32:
-		return nla_validate_range_unsigned(pt, nla, extack, validate);
-	case NLA_S8:
-	case NLA_S16:
-	case NLA_S32:
-	case NLA_S64:
-		return nla_validate_int_range_signed(pt, nla, extack);
+		/* treat this one specially, since it may not fit into s64 */
+		if ((validate_min && nla_get_u64(nla) < pt->min) ||
+		    (validate_max && nla_get_u64(nla) > pt->max)) {
+			NL_SET_ERR_MSG_ATTR(extack, nla,
+					    "integer out of range");
+			return -ERANGE;
+		}
+		return 0;
 	default:
 		WARN_ON(1);
 		return -EINVAL;
