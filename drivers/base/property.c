@@ -21,7 +21,7 @@
 struct fwnode_handle *dev_fwnode(struct device *dev)
 {
 	return IS_ENABLED(CONFIG_OF) && dev->of_node ?
-		of_fwnode_handle(dev->of_node) : dev->fwnode;
+		&dev->of_node->fwnode : dev->fwnode;
 }
 EXPORT_SYMBOL_GPL(dev_fwnode);
 
@@ -693,7 +693,7 @@ struct fwnode_handle *device_get_next_child_node(struct device *dev,
 	struct fwnode_handle *fwnode = NULL;
 
 	if (dev->of_node)
-		fwnode = of_fwnode_handle(dev->of_node);
+		fwnode = &dev->of_node->fwnode;
 	else if (adev)
 		fwnode = acpi_fwnode_handle(adev);
 
