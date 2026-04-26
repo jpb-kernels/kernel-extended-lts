@@ -2818,7 +2818,7 @@ static void xfrm_policy_queue_process(struct timer_list *t)
 		skb_dst_drop(skb);
 		skb_dst_set(skb, dst);
 
-		dst_output(net, skb_to_full_sk(skb), skb);
+		dst_output(net, skb->sk, skb);
 	}
 
 out:
