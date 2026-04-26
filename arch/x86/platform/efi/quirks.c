@@ -410,17 +410,6 @@ void __init efi_free_boot_services(void)
 	int num_entries = 0;
 	void *new, *new_md;
 
-	/* Keep all regions for /sys/kernel/debug/efi */
-	if (efi_enabled(EFI_DBG))
-		return;
-
-	sz = sizeof(*ranges_to_free) * (efi.memmap.nr_map + 1);
-	ranges_to_free = kzalloc(sz, GFP_KERNEL);
-	if (!ranges_to_free) {
-		pr_err("Failed to allocate storage for freeable EFI regions\n");
-		return;
-	}
-
 	for_each_efi_memory_desc(md) {
 		unsigned long long start = md->phys_addr;
 		unsigned long long size = md->num_pages << EFI_PAGE_SHIFT;
