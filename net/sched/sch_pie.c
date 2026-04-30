@@ -268,8 +268,26 @@ static int pie_change(struct Qdisc *sch, struct nlattr *opt,
 
 static void pie_process_dequeue(struct Qdisc *sch, struct sk_buff *skb)
 {
-	struct pie_sched_data *q = qdisc_priv(sch);
-	int qlen = sch->qstats.backlog;	/* current queue size in bytes */
+	psched_time_t now = psched_get_time();
+	u32 dtime = 0;
+
+	/* If dq_rate_estimator is disabled, calculate qdelay using the
+	 * packet timestamp.
+	 */
+	if (!params->dq_rate_estimator) {
+		WRITE_ONCE(vars->qdelay,
+			   backlog ? now - pie_get_enqueue_time(skb) : 0);
+
+		if (vars->dq_tstamp != DTIME_INVALID)
+			dtime = now - vars->dq_tstamp;
+
+		vars->dq_tstamp = now;
+
+		if (dtime == 0)
+			return;
+
+		goto burst_allowance_reduction;
+	}
 
 	/* If current queue is about 10 packets or more and dq_count is unset
 	 * we have enough packets to calculate the drain rate. Save
@@ -401,7 +419,7 @@ static void calculate_probability(struct Qdisc *sch)
 	if (qdelay > (PSCHED_NS2TICKS(250 * NSEC_PER_MSEC)))
 		delta += MAX_PROB / (100 / 2);
 
-	q->vars.prob += delta;
+	WRITE_ONCE(vars->prob, vars->prob + delta);
 
 	if (delta > 0) {
 		/* prevent overflow */
@@ -426,7 +444,7 @@ static void calculate_probability(struct Qdisc *sch)
 
 	if (qdelay == 0 && qdelay_old == 0 && update_prob)
 		/* Reduce drop probability to 98.4% */
-		q->vars.prob -= q->vars.prob / 64u;
+		WRITE_ONCE(vars->prob, vars->prob - vars->prob / 64);
 
 	WRITE_ONCE(vars->qdelay, qdelay);
 	vars->backlog_old = backlog;
@@ -515,7 +533,7 @@ static int pie_dump_stats(struct Qdisc *sch, struct gnet_dump *d)
 {
 	struct pie_sched_data *q = qdisc_priv(sch);
 	struct tc_pie_xstats st = {
-		.prob		= q->vars.prob,
+		.prob		= READ_ONCE(q->vars.prob) << BITS_PER_BYTE,
 		.delay		= ((u32)PSCHED_TICKS2NS(READ_ONCE(q->vars.qdelay))) /
 				   NSEC_PER_USEC,
 		/* unscale and return dq_rate in bytes per sec */
@@ -529,7 +547,7 @@ static int pie_dump_stats(struct Qdisc *sch, struct gnet_dump *d)
 	};
 
 	/* avg_dq_rate is only valid if dq_rate_estimator is enabled */
-	st.dq_rate_estimating = q->params.dq_rate_estimator;
+	st.dq_rate_estimating = READ_ONCE(q->params.dq_rate_estimator);
 
 	/* unscale and return dq_rate in bytes per sec */
 	if (st.dq_rate_estimating)
