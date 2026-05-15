@@ -1590,6 +1590,7 @@ struct sk_buff *__pskb_copy_fclone(struct sk_buff *skb, int headroom,
 			skb_frag_ref(skb, i);
 		}
 		skb_shinfo(n)->nr_frags = i;
+		skb_shinfo(n)->tx_flags |= skb_shinfo(skb)->tx_flags & SKBTX_SHARED_FRAG;
 	}
 
 	if (skb_has_frag_list(skb)) {
@@ -3490,6 +3491,8 @@ onlymerged:
 	tgt->ip_summed = CHECKSUM_PARTIAL;
 	skb->ip_summed = CHECKSUM_PARTIAL;
 
+	skb_shinfo(tgt)->tx_flags |= skb_shinfo(skb)->tx_flags & SKBTX_SHARED_FRAG;
+
 	/* Yak, is it really working this way? Some helper please? */
 	skb->len -= shiftlen;
 	skb->data_len -= shiftlen;
@@ -3723,6 +3726,121 @@ static inline skb_frag_t skb_head_frag_to_page_desc(struct sk_buff *frag_skb)
 	return head_frag;
 }
 
+struct sk_buff *skb_segment_list(struct sk_buff *skb,
+				 netdev_features_t features,
+				 unsigned int offset)
+{
+	struct sk_buff *list_skb = skb_shinfo(skb)->frag_list;
+	unsigned int tnl_hlen = skb_tnl_header_len(skb);
+	unsigned int delta_truesize = 0;
+	unsigned int delta_len = 0;
+	struct sk_buff *tail = NULL;
+	struct sk_buff *nskb, *tmp;
+	int err;
+
+	skb_push(skb, -skb_network_offset(skb) + offset);
+
+	/* Ensure the head is writeable before touching the shared info */
+	err = skb_unclone(skb, GFP_ATOMIC);
+	if (err)
+		goto err_linearize;
+
+	skb_shinfo(skb)->frag_list = NULL;
+
+	while (list_skb) {
+		nskb = list_skb;
+		list_skb = list_skb->next;
+
+		err = 0;
+		delta_truesize += nskb->truesize;
+		if (skb_shared(nskb)) {
+			tmp = skb_clone(nskb, GFP_ATOMIC);
+			if (tmp) {
+				consume_skb(nskb);
+				nskb = tmp;
+				err = skb_unclone(nskb, GFP_ATOMIC);
+			} else {
+				err = -ENOMEM;
+			}
+		}
+
+		if (!tail)
+			skb->next = nskb;
+		else
+			tail->next = nskb;
+
+		if (unlikely(err)) {
+			nskb->next = list_skb;
+			goto err_linearize;
+		}
+
+		tail = nskb;
+
+		delta_len += nskb->len;
+
+		skb_push(nskb, -skb_network_offset(nskb) + offset);
+
+		skb_release_head_state(nskb);
+		 __copy_skb_header(nskb, skb);
+
+		skb_headers_offset_update(nskb, skb_headroom(nskb) - skb_headroom(skb));
+		skb_copy_from_linear_data_offset(skb, -tnl_hlen,
+						 nskb->data - tnl_hlen,
+						 offset + tnl_hlen);
+
+		if (skb_needs_linearize(nskb, features) &&
+		    __skb_linearize(nskb))
+			goto err_linearize;
+	}
+
+	skb->truesize = skb->truesize - delta_truesize;
+	skb->data_len = skb->data_len - delta_len;
+	skb->len = skb->len - delta_len;
+
+	skb_gso_reset(skb);
+
+	skb->prev = tail;
+
+	if (skb_needs_linearize(skb, features) &&
+	    __skb_linearize(skb))
+		goto err_linearize;
+
+	skb_get(skb);
+
+	return skb;
+
+err_linearize:
+	kfree_skb_list(skb->next);
+	skb->next = NULL;
+	return ERR_PTR(-ENOMEM);
+}
+EXPORT_SYMBOL_GPL(skb_segment_list);
+
+int skb_gro_receive_list(struct sk_buff *p, struct sk_buff *skb)
+{
+	if (unlikely(p->len + skb->len >= 65536))
+		return -E2BIG;
+
+	if (NAPI_GRO_CB(p)->last == p)
+		skb_shinfo(p)->frag_list = skb;
+	else
+		NAPI_GRO_CB(p)->last->next = skb;
+
+	skb_pull(skb, skb_gro_offset(skb));
+
+	NAPI_GRO_CB(p)->last = skb;
+	NAPI_GRO_CB(p)->count++;
+	p->data_len += skb->len;
+	p->truesize += skb->truesize;
+	p->len += skb->len;
+
+	skb_shinfo(p)->tx_flags |= skb_shinfo(skb)->tx_flags & SKBTX_SHARED_FRAG;
+
+	NAPI_GRO_CB(skb)->same_flow = 1;
+
+	return 0;
+}
+
 /**
  *	skb_segment - Perform protocol segmentation on skb.
  *	@head_skb: buffer to segment
@@ -3946,7 +4064,8 @@ normal:
 		skb_copy_from_linear_data_offset(head_skb, offset,
 						 skb_put(nskb, hsize), hsize);
 
-		skb_shinfo(nskb)->tx_flags |= skb_shinfo(head_skb)->tx_flags &
+		skb_shinfo(nskb)->tx_flags |= (skb_shinfo(head_skb)->tx_flags |
+					       skb_shinfo(frag_skb)->tx_flags) &
 					      SKBTX_SHARED_FRAG;
 
 		if (skb_zerocopy_clone(nskb, frag_skb, GFP_ATOMIC))
@@ -3963,6 +4082,9 @@ normal:
 				nfrags = skb_shinfo(list_skb)->nr_frags;
 				frag = skb_shinfo(list_skb)->frags;
 				frag_skb = list_skb;
+
+				skb_shinfo(nskb)->tx_flags |= skb_shinfo(frag_skb)->tx_flags & SKBTX_SHARED_FRAG;
+
 				if (!skb_headlen(list_skb)) {
 					BUG_ON(!nfrags);
 				} else {
@@ -4179,10 +4301,12 @@ done:
 	p->data_len += len;
 	p->truesize += delta_truesize;
 	p->len += len;
+	skb_shinfo(p)->tx_flags |= skbinfo->tx_flags & SKBTX_SHARED_FRAG;
 	if (lp != p) {
 		lp->data_len += len;
 		lp->truesize += delta_truesize;
 		lp->len += len;
+		skb_shinfo(lp)->tx_flags |= skbinfo->tx_flags & SKBTX_SHARED_FRAG;
 	}
 	NAPI_GRO_CB(skb)->same_flow = 1;
 	return 0;
