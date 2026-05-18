@@ -230,9 +230,18 @@ static int q6asm_dai_prepare(struct snd_pcm_substream *substream)
 	/* rate and channels are sent to audio driver */
 	if (prtd->state) {
 		/* clear the previous setup if any  */
-		q6asm_cmd(prtd->audio_client, CMD_CLOSE);
-		q6asm_unmap_memory_regions(substream->stream,
-					   prtd->audio_client);
+		ret = q6asm_cmd(prtd->audio_client, CMD_CLOSE);
+		if (ret < 0) {
+			dev_err(dev, "Failed to close q6asm stream %d\n", prtd->stream_id);
+			return ret;
+		}
+
+		ret = q6asm_unmap_memory_regions(substream->stream, prtd->audio_client);
+		if (ret < 0) {
+			dev_err(dev, "Failed to unmap memory regions for q6asm stream %d\n",
+				prtd->stream_id);
+			return ret;
+		}
 		q6routing_stream_close(soc_prtd->dai_link->id,
 					 substream->stream);
 	}
@@ -291,7 +300,14 @@ static int q6asm_dai_prepare(struct snd_pcm_substream *substream)
 
 	prtd->state = Q6ASM_STREAM_RUNNING;
 
-	return 0;
+	return ret;
+
+routing_err:
+	q6asm_cmd(prtd->audio_client, prtd->stream_id,  CMD_CLOSE);
+open_err:
+	q6asm_unmap_memory_regions(substream->stream, prtd->audio_client);
+
+	return ret;
 }
 
 static int q6asm_dai_trigger(struct snd_pcm_substream *substream, int cmd)
@@ -670,7 +686,15 @@ static int q6asm_dai_compr_set_params(struct snd_compr_stream *stream,
 			      prtd->session_id, dir);
 	if (ret) {
 		dev_err(dev, "Stream reg failed ret:%d\n", ret);
-		return ret;
+		goto routing_err;
+	}
+
+	ret = __q6asm_dai_compr_set_codec_params(component, stream,
+						 &params->codec,
+						 prtd->stream_id);
+	if (ret) {
+		dev_err(dev, "codec param setup failed ret:%d\n", ret);
+		goto q6_err;
 	}
 
 	ret = q6asm_map_memory_regions(dir, prtd->audio_client, prtd->phys,
@@ -685,6 +709,14 @@ static int q6asm_dai_compr_set_params(struct snd_compr_stream *stream,
 	prtd->state = Q6ASM_STREAM_RUNNING;
 
 	return 0;
+
+q6_err:
+	q6routing_stream_close(rtd->dai_link->id, dir);
+routing_err:
+	q6asm_cmd(prtd->audio_client, prtd->stream_id, CMD_CLOSE);
+
+open_err:
+	return ret;
 }
 
 static int q6asm_dai_compr_trigger(struct snd_compr_stream *stream, int cmd)
