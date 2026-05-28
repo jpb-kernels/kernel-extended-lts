@@ -1041,3 +1041,131 @@ flood_test()
 	flood_unicast_test $br_port $host1_if $host2_if
 	flood_multicast_test $br_port $host1_if $host2_if
 }
+
+__start_traffic()
+{
+	local proto=$1; shift
+	local h_in=$1; shift    # Where the traffic egresses the host
+	local sip=$1; shift
+	local dip=$1; shift
+	local dmac=$1; shift
+
+	$MZ $h_in -p 8000 -A $sip -B $dip -c 0 \
+		-a own -b $dmac -t "$proto" -q "$@" &
+	sleep 1
+}
+
+start_traffic()
+{
+	__start_traffic udp "$@"
+}
+
+start_tcp_traffic()
+{
+	__start_traffic tcp "$@"
+}
+
+stop_traffic()
+{
+	# Suppress noise from killing mausezahn.
+	{ kill %% && wait %%; } 2>/dev/null
+}
+
+tcpdump_start()
+{
+	local if_name=$1; shift
+	local ns=$1; shift
+
+	capfile=$(mktemp)
+	capout=$(mktemp)
+
+	if [ -z $ns ]; then
+		ns_cmd=""
+	else
+		ns_cmd="ip netns exec ${ns}"
+	fi
+
+	if [ -z $SUDO_USER ] ; then
+		capuser=""
+	else
+		capuser="-Z $SUDO_USER"
+	fi
+
+	$ns_cmd tcpdump -e -n -Q in -i $if_name \
+		-s 65535 -B 32768 $capuser -w $capfile > "$capout" 2>&1 &
+	cappid=$!
+
+	sleep 1
+}
+
+tcpdump_stop()
+{
+	$ns_cmd kill $cappid
+	sleep 1
+}
+
+tcpdump_cleanup()
+{
+	rm $capfile $capout
+}
+
+tcpdump_show()
+{
+	tcpdump -e -n -r $capfile 2>&1
+}
+
+u16_to_bytes()
+{
+	local u16=$1; shift
+
+	printf "%04x" $u16 | sed 's/^/000/;s/^.*\(..\)\(..\)$/\1:\2/'
+}
+
+# Given a mausezahn-formatted payload (colon-separated bytes given as %02x),
+# possibly with a keyword CHECKSUM stashed where a 16-bit checksum should be,
+# calculate checksum as per RFC 1071, assuming the CHECKSUM field (if any)
+# stands for 00:00.
+payload_template_calc_checksum()
+{
+	local payload=$1; shift
+
+	(
+	    # Set input radix.
+	    echo "16i"
+	    # Push zero for the initial checksum.
+	    echo 0
+
+	    # Pad the payload with a terminating 00: in case we get an odd
+	    # number of bytes.
+	    echo "${payload%:}:00:" |
+		sed 's/CHECKSUM/00:00/g' |
+		tr '[:lower:]' '[:upper:]' |
+		# Add the word to the checksum.
+		sed 's/\(..\):\(..\):/\1\2+\n/g' |
+		# Strip the extra odd byte we pushed if left unconverted.
+		sed 's/\(..\):$//'
+
+	    echo "10000 ~ +"	# Calculate and add carry.
+	    echo "FFFF r - p"	# Bit-flip and print.
+	) |
+	    dc |
+	    tr '[:upper:]' '[:lower:]'
+}
+
+payload_template_expand_checksum()
+{
+	local payload=$1; shift
+	local checksum=$1; shift
+
+	local ckbytes=$(u16_to_bytes $checksum)
+
+	echo "$payload" | sed "s/CHECKSUM/$ckbytes/g"
+}
+
+payload_template_nbytes()
+{
+	local payload=$1; shift
+
+	payload_template_expand_checksum "${payload%:}" 0 |
+		sed 's/:/\n/g' | wc -l
+}
