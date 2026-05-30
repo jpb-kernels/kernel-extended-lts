@@ -336,7 +336,7 @@ static ssize_t svc_recvfrom(struct svc_rqst *rqstp, struct kvec *iov,
 	rqstp->rq_xprt_hlen = 0;
 
 	clear_bit(XPT_DATA, &svsk->sk_xprt.xpt_flags);
-	iov_iter_kvec(&msg.msg_iter, READ, iov, nr, buflen);
+	iov_iter_kvec(&msg.msg_iter, ITER_DEST, iov, nr, buflen);
 	if (base != 0) {
 		iov_iter_advance(&msg.msg_iter, base);
 		buflen -= base;
@@ -934,7 +934,8 @@ static int svc_tcp_recv_record(struct svc_sock *svsk, struct svc_rqst *rqstp)
 		want = sizeof(rpc_fraghdr) - svsk->sk_tcplen;
 		iov.iov_base = ((char *) &svsk->sk_reclen) + svsk->sk_tcplen;
 		iov.iov_len  = want;
-		len = svc_recvfrom(rqstp, &iov, 1, want, 0);
+		iov_iter_kvec(&msg.msg_iter, ITER_DEST, &iov, 1, want);
+		len = sock_recvmsg(svsk->sk_sock, &msg, MSG_DONTWAIT);
 		if (len < 0)
 			goto error;
 		svsk->sk_tcplen += len;

@@ -290,7 +290,7 @@ int smc_clc_wait_msg(struct smc_sock *smc, void *buf, int buflen,
 	 */
 	krflags = MSG_PEEK | MSG_WAITALL;
 	clc_sk->sk_rcvtimeo = timeout;
-	iov_iter_kvec(&msg.msg_iter, READ, &vec, 1,
+	iov_iter_kvec(&msg.msg_iter, ITER_DEST, &vec, 1,
 			sizeof(struct smc_clc_msg_hdr));
 	len = sock_recvmsg(smc->clcsock, &msg, krflags);
 	if (signal_pending(current)) {
@@ -334,13 +334,31 @@ int smc_clc_wait_msg(struct smc_sock *smc, void *buf, int buflen,
 
 	/* receive the complete CLC message */
 	memset(&msg, 0, sizeof(struct msghdr));
-	iov_iter_kvec(&msg.msg_iter, READ, &vec, 1, datlen);
+	iov_iter_kvec(&msg.msg_iter, ITER_DEST, &vec, 1, datlen);
 	krflags = MSG_WAITALL;
 	len = sock_recvmsg(smc->clcsock, &msg, krflags);
 	if (len < datlen || !smc_clc_msg_hdr_valid(clcm)) {
 		smc->sk.sk_err = EPROTO;
 		reason_code = -EPROTO;
 		goto out;
+	}
+	datlen -= len;
+	while (datlen) {
+		u8 tmp[SMC_CLC_RECV_BUF_LEN];
+
+		vec.iov_base = &tmp;
+		vec.iov_len = SMC_CLC_RECV_BUF_LEN;
+		/* receive remaining proposal message */
+		recvlen = datlen > SMC_CLC_RECV_BUF_LEN ?
+						SMC_CLC_RECV_BUF_LEN : datlen;
+		iov_iter_kvec(&msg.msg_iter, ITER_DEST, &vec, 1, recvlen);
+		len = sock_recvmsg(smc->clcsock, &msg, krflags);
+		if (len < recvlen) {
+			smc->sk.sk_err = EPROTO;
+			reason_code = -EPROTO;
+			goto out;
+		}
+		datlen -= len;
 	}
 	if (clcm->type == SMC_CLC_DECLINE) {
 		struct smc_clc_msg_decline *dclc;
