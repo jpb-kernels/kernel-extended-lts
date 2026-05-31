@@ -41,6 +41,11 @@ struct tc_action {
 	struct gnet_stats_queue __percpu *cpu_qstats;
 	struct tc_cookie	__rcu *act_cookie;
 	struct tcf_chain	__rcu *goto_chain;
+	u32			tcfa_flags;
+	struct rcu_head         tcfa_rcu;
+	u8			hw_stats;
+	u8			used_hw_stats;
+	bool			used_hw_stats_valid;
 };
 #define tcf_index	common.tcfa_index
 #define tcf_refcnt	common.tcfa_refcnt
