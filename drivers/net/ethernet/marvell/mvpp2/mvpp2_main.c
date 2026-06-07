@@ -2953,6 +2953,22 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 			MVPP2_RXD_BM_POOL_ID_OFFS;
 		bm_pool = &port->priv->bm_pools[pool];
 
+		if (port->priv->percpu_pools) {
+			pp = port->priv->page_pool[pool];
+			dma_dir = page_pool_get_dma_dir(pp);
+		} else {
+			dma_dir = DMA_FROM_DEVICE;
+		}
+
+		dma_sync_single_range_for_cpu(dev->dev.parent, dma_addr,
+					      MVPP2_SKB_HEADROOM,
+					      rx_bytes + MVPP2_MH_SIZE,
+					      dma_dir);
+
+		/* Buffer header not supported */
+		if (rx_status & MVPP2_RXD_BUF_HDR)
+			goto err_drop_frame;
+
 		/* In case of an error, release the requested buffer pointer
 		 * to the Buffer Manager. This request process is controlled
 		 * by the hardware, and the information about the buffer is
