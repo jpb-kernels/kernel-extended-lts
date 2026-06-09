@@ -8,6 +8,25 @@
 #define _NFSD_STATS_H
 
 #include <uapi/linux/nfsd/stats.h>
+#include <linux/percpu_counter.h>
+
+int nfsd_percpu_counters_init(struct percpu_counter *counters, int num);
+void nfsd_percpu_counters_reset(struct percpu_counter *counters, int num);
+void nfsd_percpu_counters_destroy(struct percpu_counter *counters, int num);
+int nfsd_stat_counters_init(struct nfsd_net *nn);
+void nfsd_stat_counters_destroy(struct nfsd_net *nn);
+struct proc_dir_entry *nfsd_proc_stat_init(struct net *net);
+void nfsd_proc_stat_shutdown(struct net *net);
+
+static inline void nfsd_stats_rc_hits_inc(struct nfsd_net *nn)
+{
+	percpu_counter_inc(&nn->counter[NFSD_STATS_RC_HITS]);
+}
+
+static inline void nfsd_stats_rc_misses_inc(struct nfsd_net *nn)
+{
+	percpu_counter_inc(&nn->counter[NFSD_STATS_RC_MISSES]);
+}
 
 
 struct nfsd_stats {
