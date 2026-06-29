@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007, 2017 Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2007, 2020 Oracle and/or its affiliates.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -298,7 +298,8 @@ static int __rds_rdma_map(struct rds_sock *rs, struct rds_get_mr_args *args,
 	if (cookie_ret)
 		*cookie_ret = cookie;
 
-	if (args->cookie_addr && put_user(cookie, (u64 __user *)(unsigned long) args->cookie_addr)) {
+	if (args->cookie_addr &&
+	    put_user(cookie, (u64 __user *)(unsigned long)args->cookie_addr)) {
 		ret = -EFAULT;
 		goto out;
 	}

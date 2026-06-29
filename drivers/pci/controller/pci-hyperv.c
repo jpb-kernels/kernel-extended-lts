@@ -1848,6 +1848,44 @@ static void hv_pci_remove_slots(struct hv_pcibus_device *hbus)
 	}
 }
 
+/*
+ * Set NUMA node for the devices on the bus
+ */
+static void hv_pci_assign_numa_node(struct hv_pcibus_device *hbus)
+{
+	struct pci_dev *dev;
+	struct pci_bus *bus = hbus->pci_bus;
+	struct hv_pci_dev *hv_dev;
+
+	list_for_each_entry(dev, &bus->devices, bus_list) {
+		hv_dev = get_pcichild_wslot(hbus, devfn_to_wslot(dev->devfn));
+		if (!hv_dev)
+			continue;
+
+		/*
+		 * If the Hyper-V host doesn't provide a NUMA node for the
+		 * device, default to node 0. With NUMA_NO_NODE the kernel
+		 * may spread work across NUMA nodes, which degrades
+		 * performance on Hyper-V.
+		 */
+		set_dev_node(&dev->dev, 0);
+
+		if (hv_dev->desc.flags & HV_PCI_DEVICE_FLAG_NUMA_AFFINITY &&
+		    hv_dev->desc.virtual_numa_node < num_possible_nodes())
+			/*
+			 * The kernel may boot with some NUMA nodes offline
+			 * (e.g. in a KDUMP kernel) or with NUMA disabled via
+			 * "numa=off". In those cases, adjust the host provided
+			 * NUMA node to a valid NUMA node used by the kernel.
+			 */
+			set_dev_node(&dev->dev,
+				     numa_map_to_online_node(
+					     hv_dev->desc.virtual_numa_node));
+
+		put_pcichild(hv_dev);
+	}
+}
+
 /**
  * create_root_hv_pci_bus() - Expose a new root PCI bus
  * @hbus:	Root PCI bus, as understood by this driver

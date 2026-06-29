@@ -66,7 +66,6 @@ static inline size_t ib_umem_num_pages(struct ib_umem *umem)
 		ALIGN_DOWN(umem->address, PAGE_SIZE)) >>
 	       PAGE_SHIFT;
 }
-
 #ifdef CONFIG_INFINIBAND_USER_MEM
 
 struct ib_umem *ib_umem_get(struct ib_udata *udata, unsigned long addr,

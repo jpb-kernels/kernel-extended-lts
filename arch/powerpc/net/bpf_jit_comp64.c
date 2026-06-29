@@ -256,31 +256,33 @@ static int bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 o
 	/*
 	 * tail_call_cnt++;
 	 */
-	PPC_ADDI(b2p[TMP_REG_1], b2p[TMP_REG_1], 1);
-	PPC_BPF_STL(b2p[TMP_REG_1], 1, bpf_jit_stack_tailcallcnt(ctx));
+	EMIT(PPC_RAW_ADDI(b2p[TMP_REG_1], b2p[TMP_REG_1], 1));
 
 	/* prog = array->ptrs[index]; */
-	PPC_MULI(b2p[TMP_REG_1], b2p_index, 8);
-	PPC_ADD(b2p[TMP_REG_1], b2p[TMP_REG_1], b2p_bpf_array);
-	PPC_BPF_LL(b2p[TMP_REG_1], b2p[TMP_REG_1], offsetof(struct bpf_array, ptrs));
+	EMIT(PPC_RAW_MULI(b2p[TMP_REG_2], b2p_index, 8));
+	EMIT(PPC_RAW_ADD(b2p[TMP_REG_2], b2p[TMP_REG_2], b2p_bpf_array));
+	PPC_BPF_LL(b2p[TMP_REG_2], b2p[TMP_REG_2], offsetof(struct bpf_array, ptrs));
 
 	/*
 	 * if (prog == NULL)
 	 *   goto out;
 	 */
-	PPC_CMPLDI(b2p[TMP_REG_1], 0);
+	EMIT(PPC_RAW_CMPLDI(b2p[TMP_REG_2], 0));
 	PPC_BCC(COND_EQ, out);
 
 	/* goto *(prog->bpf_func + prologue_size); */
-	PPC_BPF_LL(b2p[TMP_REG_1], b2p[TMP_REG_1], offsetof(struct bpf_prog, bpf_func));
+	PPC_BPF_LL(b2p[TMP_REG_2], b2p[TMP_REG_2], offsetof(struct bpf_prog, bpf_func));
 #ifdef PPC64_ELF_ABI_v1
 	/* skip past the function descriptor */
-	PPC_ADDI(b2p[TMP_REG_1], b2p[TMP_REG_1],
-			FUNCTION_DESCR_SIZE + BPF_TAILCALL_PROLOGUE_SIZE);
+	EMIT(PPC_RAW_ADDI(b2p[TMP_REG_2], b2p[TMP_REG_2],
+			FUNCTION_DESCR_SIZE + BPF_TAILCALL_PROLOGUE_SIZE));
 #else
-	PPC_ADDI(b2p[TMP_REG_1], b2p[TMP_REG_1], BPF_TAILCALL_PROLOGUE_SIZE);
+	PPC_ADDI(b2p[TMP_REG_2], b2p[TMP_REG_2], BPF_TAILCALL_PROLOGUE_SIZE);
 #endif
-	PPC_MTCTR(b2p[TMP_REG_1]);
+	PPC_MTCTR(b2p[TMP_REG_2]));
+
+	/* Writeback updated tailcall count */
+	PPC_BPF_STL(b2p[TMP_REG_1], 1, bpf_jit_stack_tailcallcnt(ctx);
 
 	/* tear down stack, restore NVRs, ... */
 	bpf_jit_emit_common_epilogue(image, ctx);

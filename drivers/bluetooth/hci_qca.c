@@ -43,8 +43,12 @@
 #define HCI_MAX_IBS_SIZE	10
 
 #define IBS_WAKE_RETRANS_TIMEOUT_MS	100
-#define IBS_TX_IDLE_TIMEOUT_MS		2000
-#define CMD_TRANS_TIMEOUT_MS		100
+#define IBS_BTSOC_TX_IDLE_TIMEOUT	msecs_to_jiffies(200)
+#define IBS_HOST_TX_IDLE_TIMEOUT_MS	2000
+#define CMD_TRANS_TIMEOUT		msecs_to_jiffies(100)
+#define MEMDUMP_TIMEOUT			msecs_to_jiffies(8000)
+#define FW_DOWNLOAD_TIMEOUT		msecs_to_jiffies(3000)
+#define IBS_DISABLE_SSR_TIMEOUT		(MEMDUMP_TIMEOUT + FW_DOWNLOAD_TIMEOUT)
 
 /* susclk rate */
 #define SUSCLK_RATE_32KHZ	32768
@@ -874,6 +878,182 @@ static int qca_recv_acl_data(struct hci_dev *hdev, struct sk_buff *skb)
 	return hci_recv_frame(hdev, skb);
 }
 
+static void qca_controller_memdump(struct work_struct *work)
+{
+	struct qca_data *qca = container_of(work, struct qca_data,
+					    ctrl_memdump_evt);
+	struct hci_uart *hu = qca->hu;
+	struct sk_buff *skb;
+	struct qca_memdump_event_hdr *cmd_hdr;
+	struct qca_memdump_data *qca_memdump = qca->qca_memdump;
+	struct qca_dump_size *dump;
+	char *memdump_buf;
+	char nullBuff[QCA_DUMP_PACKET_SIZE] = { 0 };
+	u16 seq_no;
+	u32 dump_size;
+	u32 rx_size;
+	enum qca_btsoc_type soc_type = qca_soc_type(hu);
+
+	while ((skb = skb_dequeue(&qca->rx_memdump_q))) {
+
+		mutex_lock(&qca->hci_memdump_lock);
+		/* Skip processing the received packets if timeout detected
+		 * or memdump collection completed.
+		 */
+		if (qca->memdump_state == QCA_MEMDUMP_TIMEOUT ||
+		    qca->memdump_state == QCA_MEMDUMP_COLLECTED) {
+			mutex_unlock(&qca->hci_memdump_lock);
+			return;
+		}
+
+		if (!qca_memdump) {
+			qca_memdump = kzalloc(sizeof(struct qca_memdump_data),
+					      GFP_ATOMIC);
+			if (!qca_memdump) {
+				mutex_unlock(&qca->hci_memdump_lock);
+				return;
+			}
+
+			qca->qca_memdump = qca_memdump;
+		}
+
+		qca->memdump_state = QCA_MEMDUMP_COLLECTING;
+		cmd_hdr = (void *) skb->data;
+		seq_no = __le16_to_cpu(cmd_hdr->seq_no);
+		skb_pull(skb, sizeof(struct qca_memdump_event_hdr));
+
+		if (!seq_no) {
+
+			/* This is the first frame of memdump packet from
+			 * the controller, Disable IBS to recevie dump
+			 * with out any interruption, ideally time required for
+			 * the controller to send the dump is 8 seconds. let us
+			 * start timer to handle this asynchronous activity.
+			 */
+			set_bit(QCA_IBS_DISABLED, &qca->flags);
+			set_bit(QCA_MEMDUMP_COLLECTION, &qca->flags);
+			dump = (void *) skb->data;
+			dump_size = __le32_to_cpu(dump->dump_size);
+			if (!(dump_size)) {
+				bt_dev_err(hu->hdev, "Rx invalid memdump size");
+				kfree(qca_memdump);
+				kfree_skb(skb);
+				qca->qca_memdump = NULL;
+				mutex_unlock(&qca->hci_memdump_lock);
+				return;
+			}
+
+			bt_dev_info(hu->hdev, "QCA collecting dump of size:%u",
+				    dump_size);
+			queue_delayed_work(qca->workqueue,
+					   &qca->ctrl_memdump_timeout,
+					   MEMDUMP_TIMEOUT
+					  );
+
+			skb_pull(skb, sizeof(dump_size));
+			memdump_buf = vmalloc(dump_size);
+			qca_memdump->ram_dump_size = dump_size;
+			qca_memdump->memdump_buf_head = memdump_buf;
+			qca_memdump->memdump_buf_tail = memdump_buf;
+		}
+
+		memdump_buf = qca_memdump->memdump_buf_tail;
+
+		/* If sequence no 0 is missed then there is no point in
+		 * accepting the other sequences.
+		 */
+		if (!memdump_buf) {
+			bt_dev_err(hu->hdev, "QCA: Discarding other packets");
+			kfree(qca_memdump);
+			kfree_skb(skb);
+			qca->qca_memdump = NULL;
+			mutex_unlock(&qca->hci_memdump_lock);
+			return;
+		}
+
+		/* There could be chance of missing some packets from
+		 * the controller. In such cases let us store the dummy
+		 * packets in the buffer.
+		 */
+		/* For QCA6390, controller does not lost packets but
+		 * sequence number field of packat sometimes has error
+		 * bits, so skip this checking for missing packet.
+		 */
+		while ((seq_no > qca_memdump->current_seq_no + 1) &&
+		       (soc_type != QCA_QCA6390) &&
+		       seq_no != QCA_LAST_SEQUENCE_NUM) {
+			bt_dev_err(hu->hdev, "QCA controller missed packet:%d",
+				   qca_memdump->current_seq_no);
+			rx_size = qca_memdump->received_dump;
+			rx_size += QCA_DUMP_PACKET_SIZE;
+			if (rx_size > qca_memdump->ram_dump_size) {
+				bt_dev_err(hu->hdev,
+					   "QCA memdump received %d, no space for missed packet",
+					   qca_memdump->received_dump);
+				break;
+			}
+			memcpy(memdump_buf, nullBuff, QCA_DUMP_PACKET_SIZE);
+			memdump_buf = memdump_buf + QCA_DUMP_PACKET_SIZE;
+			qca_memdump->received_dump += QCA_DUMP_PACKET_SIZE;
+			qca_memdump->current_seq_no++;
+		}
+
+		rx_size = qca_memdump->received_dump + skb->len;
+		if (rx_size <= qca_memdump->ram_dump_size) {
+			if ((seq_no != QCA_LAST_SEQUENCE_NUM) &&
+			    (seq_no != qca_memdump->current_seq_no))
+				bt_dev_err(hu->hdev,
+					   "QCA memdump unexpected packet %d",
+					   seq_no);
+			bt_dev_dbg(hu->hdev,
+				   "QCA memdump packet %d with length %d",
+				   seq_no, skb->len);
+			memcpy(memdump_buf, (unsigned char *)skb->data,
+			       skb->len);
+			memdump_buf = memdump_buf + skb->len;
+			qca_memdump->memdump_buf_tail = memdump_buf;
+			qca_memdump->current_seq_no = seq_no + 1;
+			qca_memdump->received_dump += skb->len;
+		} else {
+			bt_dev_err(hu->hdev,
+				   "QCA memdump received %d, no space for packet %d",
+				   qca_memdump->received_dump, seq_no);
+		}
+		qca->qca_memdump = qca_memdump;
+		kfree_skb(skb);
+		if (seq_no == QCA_LAST_SEQUENCE_NUM) {
+			bt_dev_info(hu->hdev,
+				    "QCA memdump Done, received %d, total %d",
+				    qca_memdump->received_dump,
+				    qca_memdump->ram_dump_size);
+			memdump_buf = qca_memdump->memdump_buf_head;
+			dev_coredumpv(&hu->serdev->dev, memdump_buf,
+				      qca_memdump->received_dump, GFP_KERNEL);
+			cancel_delayed_work(&qca->ctrl_memdump_timeout);
+			kfree(qca->qca_memdump);
+			qca->qca_memdump = NULL;
+			qca->memdump_state = QCA_MEMDUMP_COLLECTED;
+			clear_bit(QCA_MEMDUMP_COLLECTION, &qca->flags);
+		}
+
+		mutex_unlock(&qca->hci_memdump_lock);
+	}
+
+}
+
+static int qca_controller_memdump_event(struct hci_dev *hdev,
+					struct sk_buff *skb)
+{
+	struct hci_uart *hu = hci_get_drvdata(hdev);
+	struct qca_data *qca = hu->priv;
+
+	set_bit(QCA_SSR_TRIGGERED, &qca->flags);
+	skb_queue_tail(&qca->rx_memdump_q, skb);
+	queue_work(qca->workqueue, &qca->ctrl_memdump_evt);
+
+	return 0;
+}
+
 static int qca_recv_event(struct hci_dev *hdev, struct sk_buff *skb)
 {
 	struct hci_uart *hu = hci_get_drvdata(hdev);
@@ -1027,7 +1207,7 @@ static int qca_set_baudrate(struct hci_dev *hdev, uint8_t baudrate)
 
 	if (hu->serdev)
 		serdev_device_wait_until_sent(hu->serdev,
-		      msecs_to_jiffies(CMD_TRANS_TIMEOUT_MS));
+		      CMD_TRANS_TIMEOUT);
 
 	/* Give the controller time to process the request */
 	if (qca_is_wcn399x(qca_soc_type(hu)))
@@ -1048,8 +1228,8 @@ static inline void host_set_baudrate(struct hci_uart *hu, unsigned int speed)
 
 static int qca_send_power_pulse(struct hci_uart *hu, bool on)
 {
+	int timeout = CMD_TRANS_TIMEOUT;
 	int ret;
-	int timeout = msecs_to_jiffies(CMD_TRANS_TIMEOUT_MS);
 	u8 cmd = on ? QCA_WCN3990_POWERON_PULSE : QCA_WCN3990_POWEROFF_PULSE;
 
 	/* These power pulses are single byte command which are sent
@@ -1175,6 +1355,122 @@ error:
 	}
 
 	return ret;
+}
+
+static int qca_send_crashbuffer(struct hci_uart *hu)
+{
+	struct qca_data *qca = hu->priv;
+	struct sk_buff *skb;
+
+	skb = bt_skb_alloc(QCA_CRASHBYTE_PACKET_LEN, GFP_KERNEL);
+	if (!skb) {
+		bt_dev_err(hu->hdev, "Failed to allocate memory for skb packet");
+		return -ENOMEM;
+	}
+
+	/* We forcefully crash the controller, by sending 0xfb byte for
+	 * 1024 times. We also might have chance of losing data, To be
+	 * on safer side we send 1096 bytes to the SoC.
+	 */
+	memset(skb_put(skb, QCA_CRASHBYTE_PACKET_LEN), QCA_MEMDUMP_BYTE,
+	       QCA_CRASHBYTE_PACKET_LEN);
+	hci_skb_pkt_type(skb) = HCI_COMMAND_PKT;
+	bt_dev_info(hu->hdev, "crash the soc to collect controller dump");
+	skb_queue_tail(&qca->txq, skb);
+	hci_uart_tx_wakeup(hu);
+
+	return 0;
+}
+
+static void qca_wait_for_dump_collection(struct hci_dev *hdev)
+{
+	struct hci_uart *hu = hci_get_drvdata(hdev);
+	struct qca_data *qca = hu->priv;
+
+	wait_on_bit_timeout(&qca->flags, QCA_MEMDUMP_COLLECTION,
+			    TASK_UNINTERRUPTIBLE, MEMDUMP_TIMEOUT);
+
+	clear_bit(QCA_MEMDUMP_COLLECTION, &qca->flags);
+}
+
+static void qca_hw_error(struct hci_dev *hdev, u8 code)
+{
+	struct hci_uart *hu = hci_get_drvdata(hdev);
+	struct qca_data *qca = hu->priv;
+
+	set_bit(QCA_SSR_TRIGGERED, &qca->flags);
+	set_bit(QCA_HW_ERROR_EVENT, &qca->flags);
+	bt_dev_info(hdev, "mem_dump_status: %d", qca->memdump_state);
+
+	if (qca->memdump_state == QCA_MEMDUMP_IDLE) {
+		/* If hardware error event received for other than QCA
+		 * soc memory dump event, then we need to crash the SOC
+		 * and wait here for 8 seconds to get the dump packets.
+		 * This will block main thread to be on hold until we
+		 * collect dump.
+		 */
+		set_bit(QCA_MEMDUMP_COLLECTION, &qca->flags);
+		qca_send_crashbuffer(hu);
+		qca_wait_for_dump_collection(hdev);
+	} else if (qca->memdump_state == QCA_MEMDUMP_COLLECTING) {
+		/* Let us wait here until memory dump collected or
+		 * memory dump timer expired.
+		 */
+		bt_dev_info(hdev, "waiting for dump to complete");
+		qca_wait_for_dump_collection(hdev);
+	}
+
+	mutex_lock(&qca->hci_memdump_lock);
+	if (qca->memdump_state != QCA_MEMDUMP_COLLECTED) {
+		bt_dev_err(hu->hdev, "clearing allocated memory due to memdump timeout");
+		if (qca->qca_memdump) {
+			vfree(qca->qca_memdump->memdump_buf_head);
+			kfree(qca->qca_memdump);
+			qca->qca_memdump = NULL;
+		}
+		qca->memdump_state = QCA_MEMDUMP_TIMEOUT;
+		cancel_delayed_work(&qca->ctrl_memdump_timeout);
+	}
+	mutex_unlock(&qca->hci_memdump_lock);
+
+	if (qca->memdump_state == QCA_MEMDUMP_TIMEOUT ||
+	    qca->memdump_state == QCA_MEMDUMP_COLLECTED) {
+		cancel_work_sync(&qca->ctrl_memdump_evt);
+		skb_queue_purge(&qca->rx_memdump_q);
+	}
+
+	clear_bit(QCA_HW_ERROR_EVENT, &qca->flags);
+}
+
+static void qca_cmd_timeout(struct hci_dev *hdev)
+{
+	struct hci_uart *hu = hci_get_drvdata(hdev);
+	struct qca_data *qca = hu->priv;
+
+	set_bit(QCA_SSR_TRIGGERED, &qca->flags);
+	if (qca->memdump_state == QCA_MEMDUMP_IDLE) {
+		set_bit(QCA_MEMDUMP_COLLECTION, &qca->flags);
+		qca_send_crashbuffer(hu);
+		qca_wait_for_dump_collection(hdev);
+	} else if (qca->memdump_state == QCA_MEMDUMP_COLLECTING) {
+		/* Let us wait here until memory dump collected or
+		 * memory dump timer expired.
+		 */
+		bt_dev_info(hdev, "waiting for dump to complete");
+		qca_wait_for_dump_collection(hdev);
+	}
+
+	mutex_lock(&qca->hci_memdump_lock);
+	if (qca->memdump_state != QCA_MEMDUMP_COLLECTED) {
+		qca->memdump_state = QCA_MEMDUMP_TIMEOUT;
+		if (!test_bit(QCA_HW_ERROR_EVENT, &qca->flags)) {
+			/* Inject hw error event to reset the device
+			 * and driver.
+			 */
+			hci_reset_dev(hu->hdev);
+		}
+	}
+	mutex_unlock(&qca->hci_memdump_lock);
 }
 
 static int qca_wcn3990_init(struct hci_uart *hu)
@@ -1575,6 +1871,186 @@ static void qca_serdev_remove(struct serdev_device *serdev)
 	hci_uart_unregister_device(&qcadev->serdev_hu);
 }
 
+static void qca_serdev_shutdown(struct device *dev)
+{
+	int ret;
+	int timeout = CMD_TRANS_TIMEOUT;
+	struct serdev_device *serdev = to_serdev_device(dev);
+	struct qca_serdev *qcadev = serdev_device_get_drvdata(serdev);
+	struct hci_uart *hu = &qcadev->serdev_hu;
+	struct hci_dev *hdev = hu->hdev;
+	const u8 ibs_wake_cmd[] = { 0xFD };
+	const u8 edl_reset_soc_cmd[] = { 0x01, 0x00, 0xFC, 0x01, 0x05 };
+
+	if (qcadev->btsoc_type == QCA_QCA6390) {
+		/* The purpose of sending the VSC is to reset SOC into a initial
+		 * state and the state will ensure next hdev->setup() success.
+		 * if HCI_QUIRK_NON_PERSISTENT_SETUP is set, it means that
+		 * hdev->setup() can do its job regardless of SoC state, so
+		 * don't need to send the VSC.
+		 * if HCI_SETUP is set, it means that hdev->setup() was never
+		 * invoked and the SOC is already in the initial state, so
+		 * don't also need to send the VSC.
+		 */
+		if (test_bit(HCI_QUIRK_NON_PERSISTENT_SETUP, &hdev->quirks) ||
+		    hci_dev_test_flag(hdev, HCI_SETUP))
+			return;
+
+		/* The serdev must be in open state when conrol logic arrives
+		 * here, so also fix the use-after-free issue caused by that
+		 * the serdev is flushed or wrote after it is closed.
+		 */
+		serdev_device_write_flush(serdev);
+		ret = serdev_device_write_buf(serdev, ibs_wake_cmd,
+					      sizeof(ibs_wake_cmd));
+		if (ret < 0) {
+			BT_ERR("QCA send IBS_WAKE_IND error: %d", ret);
+			return;
+		}
+		serdev_device_wait_until_sent(serdev, timeout);
+		usleep_range(8000, 10000);
+
+		serdev_device_write_flush(serdev);
+		ret = serdev_device_write_buf(serdev, edl_reset_soc_cmd,
+					      sizeof(edl_reset_soc_cmd));
+		if (ret < 0) {
+			BT_ERR("QCA send EDL_RESET_REQ error: %d", ret);
+			return;
+		}
+		serdev_device_wait_until_sent(serdev, timeout);
+		usleep_range(8000, 10000);
+	}
+}
+
+static int __maybe_unused qca_suspend(struct device *dev)
+{
+	struct serdev_device *serdev = to_serdev_device(dev);
+	struct qca_serdev *qcadev = serdev_device_get_drvdata(serdev);
+	struct hci_uart *hu = &qcadev->serdev_hu;
+	struct qca_data *qca = hu->priv;
+	unsigned long flags;
+	bool tx_pending = false;
+	int ret = 0;
+	u8 cmd;
+	unsigned long wait_timeout = 0;
+
+	set_bit(QCA_SUSPENDING, &qca->flags);
+
+	/* if BT SoC is running with default firmware then it does not
+	 * support in-band sleep
+	 */
+	if (test_bit(QCA_ROM_FW, &qca->flags))
+		return 0;
+
+	/* During SSR after memory dump collection, controller will be
+	 * powered off and then powered on.If controller is powered off
+	 * during SSR then we should wait until SSR is completed.
+	 */
+	if (test_bit(QCA_BT_OFF, &qca->flags) &&
+	    !test_bit(QCA_SSR_TRIGGERED, &qca->flags))
+		return 0;
+
+	if (test_bit(QCA_IBS_DISABLED, &qca->flags) ||
+	    test_bit(QCA_SSR_TRIGGERED, &qca->flags)) {
+		wait_timeout = test_bit(QCA_SSR_TRIGGERED, &qca->flags) ?
+					IBS_DISABLE_SSR_TIMEOUT :
+					FW_DOWNLOAD_TIMEOUT;
+
+		/* QCA_IBS_DISABLED flag is set to true, During FW download
+		 * and during memory dump collection. It is reset to false,
+		 * After FW download complete.
+		 */
+		wait_on_bit_timeout(&qca->flags, QCA_IBS_DISABLED,
+			    TASK_UNINTERRUPTIBLE, wait_timeout);
+
+		if (test_bit(QCA_IBS_DISABLED, &qca->flags)) {
+			bt_dev_err(hu->hdev, "SSR or FW download time out");
+			ret = -ETIMEDOUT;
+			goto error;
+		}
+	}
+
+	cancel_work_sync(&qca->ws_awake_device);
+	cancel_work_sync(&qca->ws_awake_rx);
+
+	spin_lock_irqsave_nested(&qca->hci_ibs_lock,
+				 flags, SINGLE_DEPTH_NESTING);
+
+	switch (qca->tx_ibs_state) {
+	case HCI_IBS_TX_WAKING:
+		del_timer(&qca->wake_retrans_timer);
+		fallthrough;
+	case HCI_IBS_TX_AWAKE:
+		del_timer(&qca->tx_idle_timer);
+
+		serdev_device_write_flush(hu->serdev);
+		cmd = HCI_IBS_SLEEP_IND;
+		ret = serdev_device_write_buf(hu->serdev, &cmd, sizeof(cmd));
+
+		if (ret < 0) {
+			BT_ERR("Failed to send SLEEP to device");
+			break;
+		}
+
+		qca->tx_ibs_state = HCI_IBS_TX_ASLEEP;
+		qca->ibs_sent_slps++;
+		tx_pending = true;
+		break;
+
+	case HCI_IBS_TX_ASLEEP:
+		break;
+
+	default:
+		BT_ERR("Spurious tx state %d", qca->tx_ibs_state);
+		ret = -EINVAL;
+		break;
+	}
+
+	spin_unlock_irqrestore(&qca->hci_ibs_lock, flags);
+
+	if (ret < 0)
+		goto error;
+
+	if (tx_pending) {
+		serdev_device_wait_until_sent(hu->serdev,
+					      CMD_TRANS_TIMEOUT);
+		serial_clock_vote(HCI_IBS_TX_VOTE_CLOCK_OFF, hu);
+	}
+
+	/* Wait for HCI_IBS_SLEEP_IND sent by device to indicate its Tx is going
+	 * to sleep, so that the packet does not wake the system later.
+	 */
+	ret = wait_event_interruptible_timeout(qca->suspend_wait_q,
+			qca->rx_ibs_state == HCI_IBS_RX_ASLEEP,
+			IBS_BTSOC_TX_IDLE_TIMEOUT);
+	if (ret == 0) {
+		ret = -ETIMEDOUT;
+		goto error;
+	}
+
+	return 0;
+
+error:
+	clear_bit(QCA_SUSPENDING, &qca->flags);
+
+	return ret;
+}
+
+static int __maybe_unused qca_resume(struct device *dev)
+{
+	struct serdev_device *serdev = to_serdev_device(dev);
+	struct qca_serdev *qcadev = serdev_device_get_drvdata(serdev);
+	struct hci_uart *hu = &qcadev->serdev_hu;
+	struct qca_data *qca = hu->priv;
+
+	clear_bit(QCA_SUSPENDING, &qca->flags);
+
+	return 0;
+}
+
+static SIMPLE_DEV_PM_OPS(qca_pm_ops, qca_suspend, qca_resume);
+
+#ifdef CONFIG_OF
 static const struct of_device_id qca_bluetooth_of_match[] = {
 	{ .compatible = "qcom,qca6174-bt" },
 	{ .compatible = "qcom,wcn3990-bt", .data = &qca_soc_data_wcn3990},

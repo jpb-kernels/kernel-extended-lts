@@ -533,13 +533,74 @@ static void ucsi_connector_change(struct work_struct *work)
 	struct ucsi_connector *con = container_of(work, struct ucsi_connector,
 						  work);
 	struct ucsi *ucsi = con->ucsi;
-	struct ucsi_control ctrl;
+	struct ucsi_connector_status pre_ack_status;
+	struct ucsi_connector_status post_ack_status;
+	enum typec_role role, prev_role;
+	u16 inferred_changes;
+	u16 changed_flags;
+	u64 command;
 	int ret;
 
 	mutex_lock(&con->lock);
 
-	UCSI_CMD_GET_CONNECTOR_STATUS(ctrl, con->num);
-	ret = ucsi_send_command(ucsi, &ctrl, &con->status, sizeof(con->status));
+	/*
+	 * Some/many PPMs have an issue where all fields in the change bitfield
+	 * are cleared when an ACK is send. This will causes any change
+	 * between GET_CONNECTOR_STATUS and ACK to be lost.
+	 *
+	 * We work around this by re-fetching the connector status afterwards.
+	 * We then infer any changes that we see have happened but that may not
+	 * be represented in the change bitfield.
+	 *
+	 * Also, even though we don't need to know the currently supported alt
+	 * modes, we run the GET_CAM_SUPPORTED command to ensure the PPM does
+	 * not get stuck in case it assumes we do.
+	 * Always do this, rather than relying on UCSI_CONSTAT_CAM_CHANGE to be
+	 * set in the change bitfield.
+	 *
+	 * We end up with the following actions:
+	 *  1. UCSI_GET_CONNECTOR_STATUS, store result, update unprocessed_changes
+	 *  2. UCSI_GET_CAM_SUPPORTED, discard result
+	 *  3. ACK connector change
+	 *  4. UCSI_GET_CONNECTOR_STATUS, store result
+	 *  5. Infere lost changes by comparing UCSI_GET_CONNECTOR_STATUS results
+	 *  6. If PPM reported a new change, then restart in order to ACK
+	 *  7. Process everything as usual.
+	 *
+	 * We may end up seeing a change twice, but we can only miss extremely
+	 * short transitional changes.
+	 */
+
+	prev_role = !!(con->status.flags & UCSI_CONSTAT_PWR_DIR);
+
+	/* 1. First UCSI_GET_CONNECTOR_STATUS */
+	command = UCSI_GET_CONNECTOR_STATUS | UCSI_CONNECTOR_NUMBER(con->num);
+	ret = ucsi_send_command(ucsi, command, &pre_ack_status,
+				sizeof(pre_ack_status));
+	if (ret < 0) {
+		dev_err(ucsi->dev, "%s: GET_CONNECTOR_STATUS failed (%d)\n",
+			__func__, ret);
+		goto out_unlock;
+	}
+	con->unprocessed_changes |= pre_ack_status.change;
+
+	/* 2. Run UCSI_GET_CAM_SUPPORTED and discard the result. */
+	command = UCSI_GET_CAM_SUPPORTED;
+	command |= UCSI_CONNECTOR_NUMBER(con->num);
+	ucsi_send_command(con->ucsi, command, NULL, 0);
+
+	/* 3. ACK connector change */
+	ret = ucsi_acknowledge_connector_change(ucsi);
+	clear_bit(EVENT_PENDING, &ucsi->flags);
+	if (ret) {
+		dev_err(ucsi->dev, "%s: ACK failed (%d)", __func__, ret);
+		goto out_unlock;
+	}
+
+	/* 4. Second UCSI_GET_CONNECTOR_STATUS */
+	command = UCSI_GET_CONNECTOR_STATUS | UCSI_CONNECTOR_NUMBER(con->num);
+	ret = ucsi_send_command(ucsi, command, &post_ack_status,
+				sizeof(post_ack_status));
 	if (ret < 0) {
 		dev_err(ucsi->dev, "%s: GET_CONNECTOR_STATUS failed (%d)\n",
 			__func__, ret);
@@ -549,8 +610,15 @@ static void ucsi_connector_change(struct work_struct *work)
 	if (con->status.change & UCSI_CONSTAT_POWER_OPMODE_CHANGE)
 		ucsi_pwr_opmode_change(con);
 
-	if (con->status.change & UCSI_CONSTAT_POWER_DIR_CHANGE) {
+	if ((con->status.change & UCSI_CONSTAT_POWER_DIR_CHANGE) &&
+	    role != prev_role) {
 		typec_set_pwr_role(con->port, con->status.pwr_dir);
+
+		/* Some power_supply properties vary depending on the power direction when
+		 * connected
+		 */
+		if (con->status.flags & UCSI_CONSTAT_CONNECTED)
+			ucsi_port_psy_changed(con);
 
 		/* Complete pending power role swap */
 		if (!completion_done(&con->complete))

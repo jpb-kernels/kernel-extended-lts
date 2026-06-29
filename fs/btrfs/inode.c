@@ -636,8 +636,7 @@ cont:
 			extent_clear_unlock_delalloc(inode, start, end, NULL,
 						     clear_flags,
 						     PAGE_UNLOCK |
-						     PAGE_CLEAR_DIRTY |
-						     PAGE_SET_WRITEBACK |
+						     PAGE_START_WRITEBACK |
 						     page_error_op |
 						     PAGE_END_WRITEBACK);
 
@@ -879,8 +878,7 @@ retry:
 				async_extent->start +
 				async_extent->ram_size - 1,
 				NULL, EXTENT_LOCKED | EXTENT_DELALLOC,
-				PAGE_UNLOCK | PAGE_CLEAR_DIRTY |
-				PAGE_SET_WRITEBACK);
+				PAGE_UNLOCK | PAGE_START_WRITEBACK);
 		if (btrfs_submit_compressed_write(inode,
 				    async_extent->start,
 				    async_extent->ram_size,
@@ -916,10 +914,9 @@ out_free:
 				     async_extent->ram_size - 1,
 				     NULL, EXTENT_LOCKED | EXTENT_DELALLOC |
 				     EXTENT_DELALLOC_NEW |
-				     EXTENT_DEFRAG | EXTENT_DO_ACCOUNTING,
-				     PAGE_UNLOCK | PAGE_CLEAR_DIRTY |
-				     PAGE_SET_WRITEBACK | PAGE_END_WRITEBACK |
-				     PAGE_SET_ERROR);
+				     EXTENT_DEFRAG | EXTENT_CLEAR_META_RESV,
+				     PAGE_UNLOCK | PAGE_START_WRITEBACK |
+				     PAGE_END_WRITEBACK | PAGE_SET_ERROR);
 	free_async_extent_pages(async_extent);
 	kfree(async_extent);
 	goto again;
@@ -1017,8 +1014,7 @@ static noinline int cow_file_range(struct inode *inode,
 				     EXTENT_LOCKED | EXTENT_DELALLOC |
 				     EXTENT_DELALLOC_NEW | EXTENT_DEFRAG |
 				     EXTENT_DO_ACCOUNTING, PAGE_UNLOCK |
-				     PAGE_CLEAR_DIRTY | PAGE_SET_WRITEBACK |
-				     PAGE_END_WRITEBACK);
+				     PAGE_START_WRITEBACK | PAGE_END_WRITEBACK);
 			*nr_written = *nr_written +
 			     (end - start + PAGE_SIZE) / PAGE_SIZE;
 			*page_started = 1;
@@ -1142,8 +1138,7 @@ out_reserve:
 out_unlock:
 	clear_bits = EXTENT_LOCKED | EXTENT_DELALLOC | EXTENT_DELALLOC_NEW |
 		EXTENT_DEFRAG | EXTENT_CLEAR_META_RESV;
-	page_ops = PAGE_UNLOCK | PAGE_CLEAR_DIRTY | PAGE_SET_WRITEBACK |
-		PAGE_END_WRITEBACK;
+	page_ops = PAGE_UNLOCK | PAGE_START_WRITEBACK | PAGE_END_WRITEBACK;
 	/*
 	 * If we reserved an extent for our delalloc range (or a subrange) and
 	 * failed to create the respective ordered extent, then it means that
@@ -1263,9 +1258,8 @@ static int cow_file_range_async(struct inode *inode, struct page *locked_page,
 		unsigned clear_bits = EXTENT_LOCKED | EXTENT_DELALLOC |
 			EXTENT_DELALLOC_NEW | EXTENT_DEFRAG |
 			EXTENT_DO_ACCOUNTING;
-		unsigned long page_ops = PAGE_UNLOCK | PAGE_CLEAR_DIRTY |
-			PAGE_SET_WRITEBACK | PAGE_END_WRITEBACK |
-			PAGE_SET_ERROR;
+		unsigned long page_ops = PAGE_UNLOCK | PAGE_START_WRITEBACK |
+					 PAGE_END_WRITEBACK | PAGE_SET_ERROR;
 
 		extent_clear_unlock_delalloc(inode, start, end, locked_page,
 					     clear_bits, page_ops);
@@ -1444,8 +1438,7 @@ static noinline int run_delalloc_nocow(struct inode *inode,
 					     EXTENT_LOCKED | EXTENT_DELALLOC |
 					     EXTENT_DO_ACCOUNTING |
 					     EXTENT_DEFRAG, PAGE_UNLOCK |
-					     PAGE_CLEAR_DIRTY |
-					     PAGE_SET_WRITEBACK |
+					     PAGE_START_WRITEBACK |
 					     PAGE_END_WRITEBACK);
 		return -ENOMEM;
 	}
@@ -1759,8 +1752,7 @@ error:
 					     locked_page, EXTENT_LOCKED |
 					     EXTENT_DELALLOC | EXTENT_DEFRAG |
 					     EXTENT_DO_ACCOUNTING, PAGE_UNLOCK |
-					     PAGE_CLEAR_DIRTY |
-					     PAGE_SET_WRITEBACK |
+					     PAGE_START_WRITEBACK |
 					     PAGE_END_WRITEBACK);
 	btrfs_free_path(path);
 	return ret;
@@ -4782,6 +4774,8 @@ static int btrfs_rmdir(struct inode *dir, struct dentry *dentry)
 	err = btrfs_orphan_add(trans, BTRFS_I(inode));
 	if (err)
 		goto out;
+
+	btrfs_record_unlink_dir(trans, BTRFS_I(dir), BTRFS_I(inode), false);
 
 	/* now the directory is empty */
 	err = btrfs_unlink_inode(trans, root, BTRFS_I(dir),

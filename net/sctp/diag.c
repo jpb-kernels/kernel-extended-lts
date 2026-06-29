@@ -271,17 +271,21 @@ static int sctp_tsp_dump_one(struct sctp_transport *tsp, void *p)
 		goto out;
 
 	lock_sock(sk);
-	if (sk != assoc->base.sk) {
-		release_sock(sk);
-		sk = assoc->base.sk;
-		lock_sock(sk);
+
+	if (ep != assoc->ep || assoc->base.dead) {
+		err = -ESTALE;
+		goto out_unlock;
 	}
-	err = inet_sctp_diag_fill(sk, assoc, rep, req,
-				  sk_user_ns(NETLINK_CB(in_skb).sk),
-				  NETLINK_CB(in_skb).portid,
-				  nlh->nlmsg_seq, 0, nlh,
-				  commp->net_admin);
-	release_sock(sk);
+
+	rep = nlmsg_new(inet_assoc_attr_size(sk, assoc), GFP_KERNEL);
+	if (!rep) {
+		err = -ENOMEM;
+		goto out_unlock;
+	}
+
+	err = inet_sctp_diag_fill(sk, assoc, rep, req, sk_user_ns(NETLINK_CB(skb).sk),
+				  NETLINK_CB(skb).portid, commp->nlh->nlmsg_seq, 0,
+				  commp->nlh, commp->net_admin);
 	if (err < 0) {
 		WARN_ON(err == -EMSGSIZE);
 		kfree_skb(rep);
@@ -293,6 +297,9 @@ static int sctp_tsp_dump_one(struct sctp_transport *tsp, void *p)
 	if (err > 0)
 		err = 0;
 out:
+	kfree_skb(rep);
+out_unlock:
+	release_sock(sk);
 	return err;
 }
 

@@ -367,9 +367,12 @@ static struct adfs_discmap *adfs_read_map(struct super_block *sb, struct adfs_di
 
 	adfs_error(sb, "map corrupted");
 
-error_free:
-	while (--zone >= 0)
-		brelse(dm[zone].dm_bh);
+	if ((dr->nzones | dr->nzones_high << 8) == 0)
+		return -EILSEQ;
+
+	*drp = dr;
+	return 0;
+}
 
 	kfree(dm);
 	return ERR_PTR(-EIO);

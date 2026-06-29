@@ -85,49 +85,11 @@ static int amdgpu_invalidate_caches(struct ttm_bo_device *bdev, uint32_t flags)
 static int amdgpu_init_mem_type(struct ttm_bo_device *bdev, uint32_t type,
 				struct ttm_mem_type_manager *man)
 {
-	struct amdgpu_device *adev;
+	if (!size_in_page)
+		return 0;
 
-	adev = amdgpu_ttm_adev(bdev);
-
-	switch (type) {
-	case TTM_PL_SYSTEM:
-		/* System memory */
-		man->flags = TTM_MEMTYPE_FLAG_MAPPABLE;
-		man->available_caching = TTM_PL_MASK_CACHING;
-		man->default_caching = TTM_PL_FLAG_CACHED;
-		break;
-	case TTM_PL_TT:
-		/* GTT memory  */
-		man->func = &amdgpu_gtt_mgr_func;
-		man->gpu_offset = adev->gmc.gart_start;
-		man->available_caching = TTM_PL_MASK_CACHING;
-		man->default_caching = TTM_PL_FLAG_CACHED;
-		man->flags = TTM_MEMTYPE_FLAG_MAPPABLE | TTM_MEMTYPE_FLAG_CMA;
-		break;
-	case TTM_PL_VRAM:
-		/* "On-card" video ram */
-		man->func = &amdgpu_vram_mgr_func;
-		man->gpu_offset = adev->gmc.vram_start;
-		man->flags = TTM_MEMTYPE_FLAG_FIXED |
-			     TTM_MEMTYPE_FLAG_MAPPABLE;
-		man->available_caching = TTM_PL_FLAG_UNCACHED | TTM_PL_FLAG_WC;
-		man->default_caching = TTM_PL_FLAG_WC;
-		break;
-	case AMDGPU_PL_GDS:
-	case AMDGPU_PL_GWS:
-	case AMDGPU_PL_OA:
-		/* On-chip GDS memory*/
-		man->func = &ttm_bo_manager_func;
-		man->gpu_offset = 0;
-		man->flags = TTM_MEMTYPE_FLAG_FIXED | TTM_MEMTYPE_FLAG_CMA;
-		man->available_caching = TTM_PL_FLAG_UNCACHED;
-		man->default_caching = TTM_PL_FLAG_UNCACHED;
-		break;
-	default:
-		DRM_ERROR("Unsupported memory type %u\n", (unsigned)type);
-		return -EINVAL;
-	}
-	return 0;
+	return ttm_range_man_init(&adev->mman.bdev, type,
+				  false, size_in_page);
 }
 
 /**

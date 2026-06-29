@@ -6822,7 +6822,6 @@ cleanup:
 	spin_unlock_irqrestore(host->host_lock, flags);
 
 out:
-	if (!err) {
 		err = SUCCESS;
 	} else {
 		dev_err(hba->dev, "%s: failed with err %d\n", __func__, err);

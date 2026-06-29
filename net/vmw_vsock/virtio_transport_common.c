@@ -1030,8 +1030,6 @@ virtio_transport_recv_listen(struct sock *sk, struct virtio_vsock_pkt *pkt)
 		return -ENOMEM;
 	}
 
-	sk->sk_ack_backlog++;
-
 	lock_sock_nested(child, SINGLE_DEPTH_NESTING);
 
 	child->sk_state = TCP_ESTABLISHED;
@@ -1041,6 +1039,21 @@ virtio_transport_recv_listen(struct sock *sk, struct virtio_vsock_pkt *pkt)
 			le32_to_cpu(pkt->hdr.dst_port));
 	vsock_addr_init(&vchild->remote_addr, le64_to_cpu(pkt->hdr.src_cid),
 			le32_to_cpu(pkt->hdr.src_port));
+
+	ret = vsock_assign_transport(vchild, vsk);
+	/* Transport assigned (looking at remote_addr) must be the same
+	 * where we received the request.
+	 */
+	if (ret || vchild->transport != &t->transport) {
+		release_sock(child);
+		virtio_transport_reset_no_sock(t, pkt);
+		sock_put(child);
+		return ret;
+	}
+
+	sk_acceptq_added(sk);
+	if (virtio_transport_space_update(child, pkt))
+		child->sk_write_space(child);
 
 	vsock_insert_connected(vchild);
 	vsock_enqueue_accept(sk, child);

@@ -3111,11 +3111,45 @@ static void snd_soc_try_rebind_card(void)
 			list_del(&card->list);
 }
 
-int snd_soc_add_component(struct device *dev,
-			struct snd_soc_component *component,
-			const struct snd_soc_component_driver *component_driver,
-			struct snd_soc_dai_driver *dai_drv,
-			int num_dai)
+static void snd_soc_del_component_unlocked(struct snd_soc_component *component)
+{
+	struct snd_soc_card *card = component->card;
+
+	snd_soc_unregister_dais(component);
+
+	if (card)
+		snd_soc_unbind_card(card, false);
+
+	list_del(&component->list);
+}
+
+int snd_soc_component_initialize(struct snd_soc_component *component,
+				 const struct snd_soc_component_driver *driver,
+				 struct device *dev)
+{
+	INIT_LIST_HEAD(&component->dai_list);
+	INIT_LIST_HEAD(&component->dobj_list);
+	INIT_LIST_HEAD(&component->card_list);
+	INIT_LIST_HEAD(&component->list);
+	INIT_LIST_HEAD(&component->card_aux_list);
+	mutex_init(&component->io_mutex);
+
+	component->name = fmt_single_name(dev, &component->id);
+	if (!component->name) {
+		dev_err(dev, "ASoC: Failed to allocate name\n");
+		return -ENOMEM;
+	}
+
+	component->dev		= dev;
+	component->driver	= driver;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(snd_soc_component_initialize);
+
+int snd_soc_add_component(struct snd_soc_component *component,
+			  struct snd_soc_dai_driver *dai_drv,
+			  int num_dai)
 {
 	int ret;
 	int i;

@@ -938,18 +938,7 @@ static int dwc3_core_init(struct dwc3 *dwc)
 	u32			reg;
 	int			ret;
 
-	/*
-	 * Write Linux Version Code to our GUID register so it's easy to figure
-	 * out which kernel version a bug was found.
-	 */
-	dwc3_writel(dwc->regs, DWC3_GUID, LINUX_VERSION_CODE);
-
-	/* Handle USB2.0-only core configuration */
-	if (DWC3_GHWPARAMS3_SSPHY_IFC(dwc->hwparams.hwparams3) ==
-			DWC3_GHWPARAMS3_SSPHY_IFC_DIS) {
-		if (dwc->maximum_speed == USB_SPEED_SUPER)
-			dwc->maximum_speed = USB_SPEED_HIGH;
-	}
+	hw_mode = DWC3_GHWPARAMS0_MODE(dwc->hwparams.hwparams0);
 
 	ret = dwc3_phy_setup(dwc);
 	if (ret)
@@ -977,6 +966,12 @@ static int dwc3_core_init(struct dwc3 *dwc)
 	ret = dwc3_core_soft_reset(dwc);
 	if (ret)
 		goto err0a;
+
+	/*
+	 * Write Linux Version Code to our GUID register so it's easy to figure
+	 * out which kernel version a bug was found.
+	 */
+	dwc3_writel(dwc->regs, DWC3_GUID, LINUX_VERSION_CODE);
 
 	dwc3_core_setup_global_control(dwc);
 	dwc3_core_num_eps(dwc);

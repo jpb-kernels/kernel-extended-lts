@@ -844,8 +844,16 @@ static bool macsec_post_decrypt(struct sk_buff *skb, struct macsec_secy *secy, u
 		}
 		u64_stats_update_end(&rxsc_stats->syncp);
 
-		if (pn >= rx_sa->next_pn)
-			rx_sa->next_pn = pn + 1;
+		// Instead of "pn >=" - to support pn overflow in xpn
+		if (pn + 1 > rx_sa->next_pn_halves.lower) {
+			rx_sa->next_pn_halves.lower = pn + 1;
+		} else if (secy->xpn &&
+			   (pn + 1 == 0 ||
+			    !pn_same_half(pn, rx_sa->next_pn_halves.lower))) {
+			rx_sa->next_pn_halves.upper++;
+			rx_sa->next_pn_halves.lower = pn + 1;
+		}
+
 		spin_unlock(&rx_sa->lock);
 	}
 

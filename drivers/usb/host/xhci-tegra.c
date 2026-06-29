@@ -162,6 +162,14 @@ struct tegra_xusb_soc {
 
 	bool scale_ss_clock;
 	bool has_ipfs;
+	bool lpm_support;
+	bool otg_reset_sspi;
+	bool otg_set_port_power;
+};
+
+struct tegra_xusb_context {
+	u32 *ipfs;
+	u32 *fpci;
 };
 
 struct tegra_xusb {
@@ -968,7 +976,241 @@ static int tegra_xusb_powerdomain_init(struct device *dev,
 static int tegra_xusb_probe(struct platform_device *pdev)
 {
 	struct tegra_xusb_mbox_msg msg;
-	struct resource *res, *regs;
+	int err;
+
+	/* Enable firmware messages from controller. */
+	msg.cmd = MBOX_CMD_MSG_ENABLED;
+	msg.data = 0;
+
+	err = tegra_xusb_mbox_send(tegra, &msg);
+	if (err < 0)
+		dev_err(tegra->dev, "failed to enable messages: %d\n", err);
+
+	return err;
+}
+
+static int tegra_xusb_enable_firmware_messages(struct tegra_xusb *tegra)
+{
+	int err;
+
+	mutex_lock(&tegra->lock);
+	err = __tegra_xusb_enable_firmware_messages(tegra);
+	mutex_unlock(&tegra->lock);
+
+	return err;
+}
+
+static void tegra_xhci_set_port_power(struct tegra_xusb *tegra, bool main,
+						 bool set)
+{
+	struct xhci_hcd *xhci = hcd_to_xhci(tegra->hcd);
+	struct usb_hcd *hcd = main ?  xhci->main_hcd : xhci->shared_hcd;
+	unsigned int wait = (!main && !set) ? 1000 : 10;
+	u16 typeReq = set ? SetPortFeature : ClearPortFeature;
+	u16 wIndex = main ? tegra->otg_usb2_port + 1 : tegra->otg_usb3_port + 1;
+	u32 status;
+	u32 stat_power = main ? USB_PORT_STAT_POWER : USB_SS_PORT_STAT_POWER;
+	u32 status_val = set ? stat_power : 0;
+
+	dev_dbg(tegra->dev, "%s():%s %s port power\n", __func__,
+		set ? "set" : "clear", main ? "HS" : "SS");
+
+	hcd->driver->hub_control(hcd, typeReq, USB_PORT_FEAT_POWER, wIndex,
+				 NULL, 0);
+
+	do {
+		tegra_xhci_hc_driver.hub_control(hcd, GetPortStatus, 0, wIndex,
+					(char *) &status, sizeof(status));
+		if (status_val == (status & stat_power))
+			break;
+
+		if (!main && !set)
+			usleep_range(600, 700);
+		else
+			usleep_range(10, 20);
+	} while (--wait > 0);
+
+	if (status_val != (status & stat_power))
+		dev_info(tegra->dev, "failed to %s %s PP %d\n",
+						set ? "set" : "clear",
+						main ? "HS" : "SS", status);
+}
+
+static struct phy *tegra_xusb_get_phy(struct tegra_xusb *tegra, char *name,
+								int port)
+{
+	unsigned int i, phy_count = 0;
+
+	for (i = 0; i < tegra->soc->num_types; i++) {
+		if (!strncmp(tegra->soc->phy_types[i].name, name,
+							    strlen(name)))
+			return tegra->phys[phy_count+port];
+
+		phy_count += tegra->soc->phy_types[i].num;
+	}
+
+	return NULL;
+}
+
+static void tegra_xhci_id_work(struct work_struct *work)
+{
+	struct tegra_xusb *tegra = container_of(work, struct tegra_xusb,
+						id_work);
+	struct xhci_hcd *xhci = hcd_to_xhci(tegra->hcd);
+	struct tegra_xusb_mbox_msg msg;
+	struct phy *phy = tegra_xusb_get_phy(tegra, "usb2",
+						    tegra->otg_usb2_port);
+	bool host_mode;
+	u32 status;
+	int ret;
+
+	mutex_lock(&tegra->lock);
+
+	host_mode = tegra->host_mode;
+
+	dev_dbg(tegra->dev, "host mode %s\n", host_mode ? "on" : "off");
+
+	if (host_mode)
+		phy_set_mode_ext(phy, PHY_MODE_USB_OTG, USB_ROLE_HOST);
+	else
+		phy_set_mode_ext(phy, PHY_MODE_USB_OTG, USB_ROLE_NONE);
+
+	mutex_unlock(&tegra->lock);
+
+	tegra->otg_usb3_port = tegra_xusb_padctl_get_usb3_companion(tegra->padctl,
+								    tegra->otg_usb2_port);
+
+	pm_runtime_get_sync(tegra->dev);
+	if (tegra->soc->otg_set_port_power) {
+		if (host_mode) {
+			/* switch to host mode */
+			if (tegra->otg_usb3_port >= 0) {
+				if (tegra->soc->otg_reset_sspi) {
+					/* set PP=0 */
+					tegra_xhci_hc_driver.hub_control(
+						xhci->shared_hcd, GetPortStatus,
+						0, tegra->otg_usb3_port+1,
+						(char *) &status, sizeof(status));
+					if (status & USB_SS_PORT_STAT_POWER)
+						tegra_xhci_set_port_power(tegra, false,
+									  false);
+
+					/* reset OTG port SSPI */
+					msg.cmd = MBOX_CMD_RESET_SSPI;
+					msg.data = tegra->otg_usb3_port+1;
+
+					ret = tegra_xusb_mbox_send(tegra, &msg);
+					if (ret < 0) {
+						dev_info(tegra->dev,
+							"failed to RESET_SSPI %d\n",
+							ret);
+					}
+				}
+
+				tegra_xhci_set_port_power(tegra, false, true);
+			}
+
+			tegra_xhci_set_port_power(tegra, true, true);
+			pm_runtime_mark_last_busy(tegra->dev);
+
+		} else {
+			if (tegra->otg_usb3_port >= 0)
+				tegra_xhci_set_port_power(tegra, false, false);
+
+			tegra_xhci_set_port_power(tegra, true, false);
+		}
+	}
+	pm_runtime_put_autosuspend(tegra->dev);
+}
+
+static int tegra_xusb_get_usb2_port(struct tegra_xusb *tegra,
+					      struct usb_phy *usbphy)
+{
+	unsigned int i;
+
+	for (i = 0; i < tegra->num_usb_phys; i++) {
+		if (tegra->usbphy[i] && usbphy == tegra->usbphy[i])
+			return i;
+	}
+
+	return -1;
+}
+
+static int tegra_xhci_id_notify(struct notifier_block *nb,
+					 unsigned long action, void *data)
+{
+	struct tegra_xusb *tegra = container_of(nb, struct tegra_xusb,
+						    id_nb);
+	struct usb_phy *usbphy = (struct usb_phy *)data;
+
+	dev_dbg(tegra->dev, "%s(): action is %d", __func__, usbphy->last_event);
+
+	if ((tegra->host_mode && usbphy->last_event == USB_EVENT_ID) ||
+		(!tegra->host_mode && usbphy->last_event != USB_EVENT_ID)) {
+		dev_dbg(tegra->dev, "Same role(%d) received. Ignore",
+			tegra->host_mode);
+		return NOTIFY_OK;
+	}
+
+	tegra->otg_usb2_port = tegra_xusb_get_usb2_port(tegra, usbphy);
+
+	tegra->host_mode = (usbphy->last_event == USB_EVENT_ID) ? true : false;
+
+	schedule_work(&tegra->id_work);
+
+	return NOTIFY_OK;
+}
+
+static int tegra_xusb_init_usb_phy(struct tegra_xusb *tegra)
+{
+	unsigned int i;
+
+	tegra->usbphy = devm_kcalloc(tegra->dev, tegra->num_usb_phys,
+				   sizeof(*tegra->usbphy), GFP_KERNEL);
+	if (!tegra->usbphy)
+		return -ENOMEM;
+
+	INIT_WORK(&tegra->id_work, tegra_xhci_id_work);
+	tegra->id_nb.notifier_call = tegra_xhci_id_notify;
+	tegra->otg_usb2_port = -EINVAL;
+	tegra->otg_usb3_port = -EINVAL;
+
+	for (i = 0; i < tegra->num_usb_phys; i++) {
+		struct phy *phy = tegra_xusb_get_phy(tegra, "usb2", i);
+
+		if (!phy)
+			continue;
+
+		tegra->usbphy[i] = devm_usb_get_phy_by_node(tegra->dev,
+							phy->dev.of_node,
+							&tegra->id_nb);
+		if (!IS_ERR(tegra->usbphy[i])) {
+			dev_dbg(tegra->dev, "usbphy-%d registered", i);
+			otg_set_host(tegra->usbphy[i]->otg, &tegra->hcd->self);
+		} else {
+			/*
+			 * usb-phy is optional, continue if its not available.
+			 */
+			tegra->usbphy[i] = NULL;
+		}
+	}
+
+	return 0;
+}
+
+static void tegra_xusb_deinit_usb_phy(struct tegra_xusb *tegra)
+{
+	unsigned int i;
+
+	cancel_work_sync(&tegra->id_work);
+
+	for (i = 0; i < tegra->num_usb_phys; i++)
+		if (tegra->usbphy[i])
+			otg_set_host(tegra->usbphy[i]->otg, NULL);
+}
+
+static int tegra_xusb_probe(struct platform_device *pdev)
+{
 	struct tegra_xusb *tegra;
 	struct xhci_hcd *xhci;
 	unsigned int i, j, k;
@@ -1383,6 +1625,14 @@ static const struct tegra_xusb_soc tegra124_soc = {
 	},
 	.scale_ss_clock = true,
 	.has_ipfs = true,
+	.otg_reset_sspi = false,
+	.otg_set_port_power = true,
+	.mbox = {
+		.cmd = 0xe4,
+		.data_in = 0xe8,
+		.data_out = 0xec,
+		.owner = 0xf0,
+	},
 };
 MODULE_FIRMWARE("nvidia/tegra124/xusb.bin");
 
@@ -1415,6 +1665,14 @@ static const struct tegra_xusb_soc tegra210_soc = {
 	},
 	.scale_ss_clock = false,
 	.has_ipfs = true,
+	.otg_reset_sspi = true,
+	.otg_set_port_power = true,
+	.mbox = {
+		.cmd = 0xe4,
+		.data_in = 0xe8,
+		.data_out = 0xec,
+		.owner = 0xf0,
+	},
 };
 MODULE_FIRMWARE("nvidia/tegra210/xusb.bin");
 
@@ -1441,7 +1699,49 @@ static const struct tegra_xusb_soc tegra186_soc = {
 	},
 	.scale_ss_clock = false,
 	.has_ipfs = false,
+	.otg_reset_sspi = false,
+	.otg_set_port_power = true,
+	.mbox = {
+		.cmd = 0xe4,
+		.data_in = 0xe8,
+		.data_out = 0xec,
+		.owner = 0xf0,
+	},
+	.lpm_support = true,
 };
+
+static const char * const tegra194_supply_names[] = {
+};
+
+static const struct tegra_xusb_phy_type tegra194_phy_types[] = {
+	{ .name = "usb3", .num = 4, },
+	{ .name = "usb2", .num = 4, },
+};
+
+static const struct tegra_xusb_soc tegra194_soc = {
+	.firmware = "nvidia/tegra194/xusb.bin",
+	.supply_names = tegra194_supply_names,
+	.num_supplies = ARRAY_SIZE(tegra194_supply_names),
+	.phy_types = tegra194_phy_types,
+	.num_types = ARRAY_SIZE(tegra194_phy_types),
+	.context = &tegra186_xusb_context,
+	.ports = {
+		.usb3 = { .offset = 0, .count = 4, },
+		.usb2 = { .offset = 4, .count = 4, },
+	},
+	.scale_ss_clock = false,
+	.has_ipfs = false,
+	.otg_reset_sspi = false,
+	.otg_set_port_power = false,
+	.mbox = {
+		.cmd = 0x68,
+		.data_in = 0x6c,
+		.data_out = 0x70,
+		.owner = 0x74,
+	},
+	.lpm_support = true,
+};
+MODULE_FIRMWARE("nvidia/tegra194/xusb.bin");
 
 static const struct of_device_id tegra_xusb_of_match[] = {
 	{ .compatible = "nvidia,tegra124-xusb", .data = &tegra124_soc },

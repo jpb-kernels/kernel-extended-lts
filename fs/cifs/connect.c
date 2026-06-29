@@ -4951,7 +4951,8 @@ int cifs_mount(struct cifs_sb_info *cifs_sb, struct smb_vol *vol)
 	if (rc) {
 		kfree(cifs_sb->origin_fullpath);
 		goto error;
-	}
+	/* mntdata is now owned by vol_list */
+	mntdata = NULL;
 	/*
 	 * After reconnecting to a different server, unique ids won't
 	 * match anymore, so we disable serverino. This prevents
@@ -4959,8 +4960,13 @@ int cifs_mount(struct cifs_sb_info *cifs_sb, struct smb_vol *vol)
 	 */
 	cifs_autodisable_serverino(cifs_sb);
 out:
+	cifs_try_adding_channels(ses);
+	rc = mount_setup_tlink(cifs_sb, ses, tcon);
+	if (rc)
+		goto error;
+
 	free_xid(xid);
-	return mount_setup_tlink(cifs_sb, ses, tcon);
+	return rc;
 
 error:
 	kfree(full_path);
@@ -4990,9 +4996,12 @@ int cifs_mount(struct cifs_sb_info *cifs_sb, struct smb_vol *vol)
 			goto error;
 	}
 
-	free_xid(xid);
+	rc = mount_setup_tlink(cifs_sb, ses, tcon);
+	if (rc)
+		goto error;
 
-	return mount_setup_tlink(cifs_sb, ses, tcon);
+	free_xid(xid);
+	return rc;
 
 error:
 	mount_put_conns(cifs_sb, xid, server, ses, tcon);

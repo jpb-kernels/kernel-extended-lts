@@ -1603,6 +1603,10 @@ static int fuse_notify_store(struct fuse_conn *fc, unsigned int size,
 	inode = ilookup5(fc->sb, nodeid, fuse_inode_eq, &nodeid);
 	if (!inode)
 		goto out_up_killsb;
+	if (!S_ISREG(inode->i_mode)) {
+		err = -EINVAL;
+		goto out_iput;
+	}
 
 	mapping = inode->i_mapping;
 	index = outarg.offset >> PAGE_SHIFT;
@@ -1772,6 +1776,9 @@ static int fuse_notify_retrieve(struct fuse_conn *fc, unsigned int size,
 
 		inode = ilookup5(fc->sb, nodeid, fuse_inode_eq, &nodeid);
 		if (inode) {
+			if (!S_ISREG(inode->i_mode))
+			err = -EINVAL;
+		else
 			err = fuse_retrieve(fc, inode, &outarg);
 			iput(inode);
 		}

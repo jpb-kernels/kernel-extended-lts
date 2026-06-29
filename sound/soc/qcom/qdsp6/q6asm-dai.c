@@ -183,7 +183,6 @@ static void event_handler(uint32_t opcode, uint32_t token,
 				   prtd->pcm_count, 0, 0, NO_TIMESTAMP);
 		break;
 	case ASM_CLIENT_EVENT_CMD_EOS_DONE:
-		prtd->state = Q6ASM_STREAM_STOPPED;
 		break;
 	case ASM_CLIENT_EVENT_DATA_WRITE_DONE: {
 		prtd->pcm_irq_pos += prtd->pcm_count;
@@ -230,9 +229,18 @@ static int q6asm_dai_prepare(struct snd_pcm_substream *substream)
 	/* rate and channels are sent to audio driver */
 	if (prtd->state) {
 		/* clear the previous setup if any  */
-		q6asm_cmd(prtd->audio_client, CMD_CLOSE);
-		q6asm_unmap_memory_regions(substream->stream,
-					   prtd->audio_client);
+		ret = q6asm_cmd(prtd->audio_client, CMD_CLOSE);
+		if (ret < 0) {
+			dev_err(dev, "Failed to close q6asm stream %d\n", prtd->stream_id);
+			return ret;
+		}
+
+		ret = q6asm_unmap_memory_regions(substream->stream, prtd->audio_client);
+		if (ret < 0) {
+			dev_err(dev, "Failed to unmap memory regions for q6asm stream %d\n",
+				prtd->stream_id);
+			return ret;
+		}
 		q6routing_stream_close(soc_prtd->dai_link->id,
 					 substream->stream);
 	}
@@ -291,7 +299,14 @@ static int q6asm_dai_prepare(struct snd_pcm_substream *substream)
 
 	prtd->state = Q6ASM_STREAM_RUNNING;
 
-	return 0;
+	return ret;
+
+routing_err:
+	q6asm_cmd(prtd->audio_client, prtd->stream_id,  CMD_CLOSE);
+open_err:
+	q6asm_unmap_memory_regions(substream->stream, prtd->audio_client);
+
+	return ret;
 }
 
 static int q6asm_dai_trigger(struct snd_pcm_substream *substream, int cmd)
@@ -307,7 +322,6 @@ static int q6asm_dai_trigger(struct snd_pcm_substream *substream, int cmd)
 		ret = q6asm_run_nowait(prtd->audio_client, 0, 0, 0);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
-		prtd->state = Q6ASM_STREAM_STOPPED;
 		ret = q6asm_cmd_nowait(prtd->audio_client, CMD_EOS);
 		break;
 	case SNDRV_PCM_TRIGGER_SUSPEND:
@@ -421,11 +435,11 @@ static int q6asm_dai_close(struct snd_pcm_substream *substream)
 	struct q6asm_dai_rtd *prtd = runtime->private_data;
 
 	if (prtd->audio_client) {
-		if (prtd->state)
+		if (prtd->state == Q6ASM_STREAM_RUNNING) {
 			q6asm_cmd(prtd->audio_client, CMD_CLOSE);
-
-		q6asm_unmap_memory_regions(substream->stream,
+			q6asm_unmap_memory_regions(substream->stream,
 					   prtd->audio_client);
+		}
 		q6asm_audio_client_free(prtd->audio_client);
 		prtd->audio_client = NULL;
 	}
@@ -514,7 +528,28 @@ static void compress_event_handler(uint32_t opcode, uint32_t token,
 		break;
 
 	case ASM_CLIENT_EVENT_CMD_EOS_DONE:
-		prtd->state = Q6ASM_STREAM_STOPPED;
+		spin_lock_irqsave(&prtd->lock, flags);
+		if (prtd->notify_on_drain) {
+			if (substream->partial_drain) {
+				/*
+				 * Close old stream and make it stale, switch
+				 * the active stream now!
+				 */
+				q6asm_cmd_nowait(prtd->audio_client,
+						 prtd->stream_id,
+						 CMD_CLOSE);
+				/*
+				 * vaild stream ids start from 1, So we are
+				 * toggling this between 1 and 2.
+				 */
+				prtd->stream_id = (prtd->stream_id == 1 ? 2 : 1);
+			}
+
+			snd_compr_drain_notify(prtd->cstream);
+			prtd->notify_on_drain = false;
+
+		}
+		spin_unlock_irqrestore(&prtd->lock, flags);
 		break;
 
 	case ASM_CLIENT_EVENT_DATA_WRITE_DONE:
@@ -611,12 +646,19 @@ static int q6asm_dai_compr_free(struct snd_compr_stream *stream)
 	struct snd_soc_pcm_runtime *rtd = stream->private_data;
 
 	if (prtd->audio_client) {
-		if (prtd->state)
-			q6asm_cmd(prtd->audio_client, CMD_CLOSE);
+		if (prtd->state == Q6ASM_STREAM_RUNNING) {
+			q6asm_cmd(prtd->audio_client, prtd->stream_id,
+				  CMD_CLOSE);
+			if (prtd->next_track_stream_id) {
+				q6asm_cmd(prtd->audio_client,
+					  prtd->next_track_stream_id,
+					  CMD_CLOSE);
+			}
 
-		snd_dma_free_pages(&prtd->dma_buffer);
-		q6asm_unmap_memory_regions(stream->direction,
+			q6asm_unmap_memory_regions(stream->direction,
 					   prtd->audio_client);
+		}
+		snd_dma_free_pages(&prtd->dma_buffer);
 		q6asm_audio_client_free(prtd->audio_client);
 		prtd->audio_client = NULL;
 	}
@@ -670,7 +712,15 @@ static int q6asm_dai_compr_set_params(struct snd_compr_stream *stream,
 			      prtd->session_id, dir);
 	if (ret) {
 		dev_err(dev, "Stream reg failed ret:%d\n", ret);
-		return ret;
+		goto routing_err;
+	}
+
+	ret = __q6asm_dai_compr_set_codec_params(component, stream,
+						 &params->codec,
+						 prtd->stream_id);
+	if (ret) {
+		dev_err(dev, "codec param setup failed ret:%d\n", ret);
+		goto q6_err;
 	}
 
 	ret = q6asm_map_memory_regions(dir, prtd->audio_client, prtd->phys,
@@ -685,6 +735,14 @@ static int q6asm_dai_compr_set_params(struct snd_compr_stream *stream,
 	prtd->state = Q6ASM_STREAM_RUNNING;
 
 	return 0;
+
+q6_err:
+	q6routing_stream_close(rtd->dai_link->id, dir);
+routing_err:
+	q6asm_cmd(prtd->audio_client, prtd->stream_id, CMD_CLOSE);
+
+open_err:
+	return ret;
 }
 
 static int q6asm_dai_compr_trigger(struct snd_compr_stream *stream, int cmd)
@@ -700,7 +758,6 @@ static int q6asm_dai_compr_trigger(struct snd_compr_stream *stream, int cmd)
 		ret = q6asm_run_nowait(prtd->audio_client, 0, 0, 0);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
-		prtd->state = Q6ASM_STREAM_STOPPED;
 		ret = q6asm_cmd_nowait(prtd->audio_client, CMD_EOS);
 		break;
 	case SNDRV_PCM_TRIGGER_SUSPEND:

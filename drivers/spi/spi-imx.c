@@ -1786,9 +1786,15 @@ static int spi_imx_probe(struct platform_device *pdev)
 	clk_disable(spi_imx->clk_per);
 	return ret;
 
-out_spi_bitbang:
-	spi_bitbang_stop(&spi_imx->bitbang);
-out_clk_put:
+out_bitbang_start:
+	if (spi_imx->devtype_data->has_dmamode)
+		spi_imx_sdma_exit(spi_imx);
+out_runtime_pm_put:
+	pm_runtime_dont_use_autosuspend(spi_imx->dev);
+	pm_runtime_disable(spi_imx->dev);
+	pm_runtime_put_noidle(spi_imx->dev);
+	pm_runtime_set_suspended(&pdev->dev);
+
 	clk_disable_unprepare(spi_imx->clk_ipg);
 out_put_per:
 	clk_disable_unprepare(spi_imx->clk_per);

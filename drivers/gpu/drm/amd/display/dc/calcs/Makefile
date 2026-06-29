@@ -24,7 +24,14 @@
 # It calculates Bandwidth and Watermarks values for HW programming
 #
 
-calcs_ccflags := -mhard-float -msse
+ifdef CONFIG_X86
+calcs_ccflags-$(CONFIG_CC_IS_GCC) := -mhard-float
+calcs_ccflags := $(calcs_ccflags-y) -msse
+endif
+
+ifdef CONFIG_PPC64
+calcs_ccflags := -mhard-float -maltivec
+endif
 
 ifdef CONFIG_CC_IS_GCC
 ifeq ($(call cc-ifversion, -lt, 0701, y), y)
