@@ -908,7 +908,7 @@ __be32 nfsd_readv(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	ssize_t host_err;
 
 	trace_nfsd_read_vector(rqstp, fhp, offset, *count);
-	iov_iter_kvec(&iter, ITER_DEST, vec, vlen, *count);
+	iov_iter_kvec(&iter, READ, vec, vlen, *count);
 	host_err = vfs_iter_read(file, &iter, &ppos, 0);
 	return nfsd_finish_read(rqstp, fhp, file, offset, count, eof, host_err);
 }
@@ -984,7 +984,7 @@ nfsd_vfs_write(struct svc_rqst *rqstp, struct svc_fh *fhp, struct file *file,
 	if (stable && !use_wgather)
 		flags |= RWF_SYNC;
 
-	iov_iter_kvec(&iter, ITER_SOURCE, vec, vlen, *cnt);
+	iov_iter_kvec(&iter, WRITE, vec, vlen, *cnt);
 	host_err = vfs_iter_write(file, &iter, &pos, flags);
 	if (host_err < 0)
 		goto out_nfserr;
@@ -1375,7 +1375,7 @@ do_nfsd_create(struct svc_rqst *rqstp, struct svc_fh *fhp,
 		v_mtime = verifier[0]&0x7fffffff;
 		v_atime = verifier[1]&0x7fffffff;
 	}
-
+	
 	if (d_really_is_positive(dchild)) {
 		err = 0;
 
@@ -1440,7 +1440,7 @@ do_nfsd_create(struct svc_rqst *rqstp, struct svc_fh *fhp,
 		/* Cram the verifier into atime/mtime */
 		iap->ia_valid = ATTR_MTIME|ATTR_ATIME
 			| ATTR_MTIME_SET|ATTR_ATIME_SET;
-		/* XXX someone who knows this better please fix it for nsec */
+		/* XXX someone who knows this better please fix it for nsec */ 
 		iap->ia_mtime.tv_sec = v_mtime;
 		iap->ia_atime.tv_sec = v_atime;
 		iap->ia_mtime.tv_nsec = 0;
@@ -1469,7 +1469,7 @@ do_nfsd_create(struct svc_rqst *rqstp, struct svc_fh *fhp,
 		dput(dchild);
 	fh_drop_write(fhp);
  	return err;
-
+ 
  out_nfserr:
 	err = nfserrno(host_err);
 	goto out;

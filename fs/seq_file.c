@@ -155,27 +155,7 @@ Eoverflow:
  */
 ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 {
-	struct iovec iov = { .iov_base = buf, .iov_len = size};
-	struct kiocb kiocb;
-	struct iov_iter iter;
-	ssize_t ret;
-
-	init_sync_kiocb(&kiocb, file);
-	iov_iter_init(&iter, ITER_DEST, &iov, 1, size);
-
-	kiocb.ki_pos = *ppos;
-	ret = seq_read_iter(&kiocb, &iter);
-	*ppos = kiocb.ki_pos;
-	return ret;
-}
-EXPORT_SYMBOL(seq_read);
-
-/*
- * Ready-made ->f_op->read_iter()
- */
-ssize_t seq_read_iter(struct kiocb *iocb, struct iov_iter *iter)
-{
-	struct seq_file *m = iocb->ki_filp->private_data;
+	struct seq_file *m = file->private_data;
 	size_t copied = 0;
 	size_t n;
 	void *p;

@@ -27,15 +27,6 @@ enum iter_type {
 	ITER_DISCARD = 64,
 };
 
-#define ITER_SOURCE	1	// == WRITE
-#define ITER_DEST	0	// == READ
-
-struct iov_iter_state {
-	size_t iov_offset;
-	size_t count;
-	unsigned long nr_segs;
-};
-
 struct iov_iter {
 	/*
 	 * Bit 0 is the read/write bit, set if we're writing.

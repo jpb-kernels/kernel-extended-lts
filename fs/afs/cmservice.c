@@ -343,7 +343,7 @@ static int afs_deliver_cb_callback(struct afs_call *call)
 			return afs_protocol_error(call, -EBADMSG,
 						  afs_eproto_cb_count);
 		call->_iter = &call->iter;
-		iov_iter_discard(&call->iter, ITER_DEST, call->count2 * 3 * 4);
+		iov_iter_discard(&call->iter, READ, call->count2 * 3 * 4);
 		call->unmarshall++;
 
 		/* Fall through */

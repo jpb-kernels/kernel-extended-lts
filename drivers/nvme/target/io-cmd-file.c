@@ -102,10 +102,10 @@ static ssize_t nvmet_file_submit_bvec(struct nvmet_req *req, loff_t pos,
 		if (req->cmd->rw.control & cpu_to_le16(NVME_RW_FUA))
 			ki_flags |= IOCB_DSYNC;
 		call_iter = req->ns->file->f_op->write_iter;
-		rw = ITER_SOURCE;
+		rw = WRITE;
 	} else {
 		call_iter = req->ns->file->f_op->read_iter;
-		rw = ITER_DEST;
+		rw = READ;
 	}
 
 	iov_iter_bvec(&iter, rw, req->f.bvec, nr_segs, count);

@@ -52,7 +52,7 @@ static int orangefs_writepage_locked(struct page *page,
 	bv.bv_len = wlen;
 	bv.bv_offset = off % PAGE_SIZE;
 	WARN_ON(wlen == 0);
-	iov_iter_bvec(&iter, ITER_SOURCE, &bv, 1, wlen);
+	iov_iter_bvec(&iter, WRITE, &bv, 1, wlen);
 
 	ret = wait_for_direct_io(ORANGEFS_IO_WRITE, inode, &off, &iter, wlen,
 	    len, wr, NULL);
@@ -115,7 +115,7 @@ static int orangefs_writepages_work(struct orangefs_writepages *ow,
 		else
 			ow->bv[i].bv_offset = 0;
 	}
-	iov_iter_bvec(&iter, ITER_SOURCE, ow->bv, ow->npages, ow->len);
+	iov_iter_bvec(&iter, WRITE, ow->bv, ow->npages, ow->len);
 
 	WARN_ON(ow->off >= len);
 	if (ow->off + ow->len > len)
@@ -280,7 +280,7 @@ static int orangefs_readpage(struct file *file, struct page *page)
 	bv.bv_page = page;
 	bv.bv_len = PAGE_SIZE;
 	bv.bv_offset = 0;
-	iov_iter_bvec(&iter, ITER_DEST, &bv, 1, PAGE_SIZE);
+	iov_iter_bvec(&iter, READ, &bv, 1, PAGE_SIZE);
 
 	ret = wait_for_direct_io(ORANGEFS_IO_READ, inode, &off, &iter,
 	    read_size, inode->i_size, NULL, &buffer_index);

@@ -409,7 +409,7 @@ static ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, lo
 
 	init_sync_kiocb(&kiocb, filp);
 	kiocb.ki_pos = (ppos ? *ppos : 0);
-	iov_iter_init(&iter, ITER_DEST, &iov, 1, len);
+	iov_iter_init(&iter, READ, &iov, 1, len);
 
 	ret = call_read_iter(filp, &kiocb, &iter);
 	BUG_ON(ret == -EIOCBQUEUED);
@@ -427,25 +427,6 @@ ssize_t __vfs_read(struct file *file, char __user *buf, size_t count,
 		return new_sync_read(file, buf, count, pos);
 	else
 		return -EINVAL;
-	/*
-	 * Also fail if ->read_iter and ->read are both wired up as that
-	 * implies very convoluted semantics.
-	 */
-	if (unlikely(!file->f_op->read_iter || file->f_op->read))
-		return warn_unsupported(file, "read");
-
-	init_sync_kiocb(&kiocb, file);
-	kiocb.ki_pos = pos ? *pos : 0;
-	iov_iter_kvec(&iter, ITER_DEST, &iov, 1, iov.iov_len);
-	ret = file->f_op->read_iter(&kiocb, &iter);
-	if (ret > 0) {
-		if (pos)
-			*pos = kiocb.ki_pos;
-		fsnotify_access(file);
-		add_rchar(current, ret);
-	}
-	inc_syscr(current);
-	return ret;
 }
 
 ssize_t kernel_read(struct file *file, void *buf, size_t count, loff_t *pos)
@@ -497,7 +478,7 @@ static ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t 
 
 	init_sync_kiocb(&kiocb, filp);
 	kiocb.ki_pos = (ppos ? *ppos : 0);
-	iov_iter_init(&iter, ITER_SOURCE, &iov, 1, len);
+	iov_iter_init(&iter, WRITE, &iov, 1, len);
 
 	ret = call_write_iter(filp, &kiocb, &iter);
 	BUG_ON(ret == -EIOCBQUEUED);
@@ -526,10 +507,13 @@ ssize_t __kernel_write(struct file *file, const void *buf, size_t count, loff_t 
 	if (!(file->f_mode & FMODE_CAN_WRITE))
 		return -EINVAL;
 
-	init_sync_kiocb(&kiocb, file);
-	kiocb.ki_pos = pos ? *pos : 0;
-	iov_iter_kvec(&iter, ITER_SOURCE, &iov, 1, iov.iov_len);
-	ret = file->f_op->write_iter(&kiocb, &iter);
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	p = (__force const char __user *)buf;
+	if (count > MAX_RW_COUNT)
+		count =  MAX_RW_COUNT;
+	ret = __vfs_write(file, p, count, pos);
+	set_fs(old_fs);
 	if (ret > 0) {
 		fsnotify_modify(file);
 		add_wchar(current, ret);
@@ -1008,7 +992,7 @@ ssize_t vfs_readv(struct file *file, const struct iovec __user *vec,
 	struct iov_iter iter;
 	ssize_t ret;
 
-	ret = import_iovec(ITER_DEST, vec, vlen, ARRAY_SIZE(iovstack), &iov, &iter);
+	ret = import_iovec(READ, vec, vlen, ARRAY_SIZE(iovstack), &iov, &iter);
 	if (ret >= 0) {
 		ret = do_iter_read(file, &iter, pos, flags);
 		kfree(iov);
@@ -1025,7 +1009,7 @@ static ssize_t vfs_writev(struct file *file, const struct iovec __user *vec,
 	struct iov_iter iter;
 	ssize_t ret;
 
-	ret = import_iovec(ITER_SOURCE, vec, vlen, ARRAY_SIZE(iovstack), &iov, &iter);
+	ret = import_iovec(WRITE, vec, vlen, ARRAY_SIZE(iovstack), &iov, &iter);
 	if (ret >= 0) {
 		file_start_write(file);
 		ret = do_iter_write(file, &iter, pos, flags);

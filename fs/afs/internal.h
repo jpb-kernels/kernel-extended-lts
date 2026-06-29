@@ -1136,7 +1136,7 @@ static inline void afs_extract_begin(struct afs_call *call, void *buf, size_t si
 {
 	call->kvec[0].iov_base = buf;
 	call->kvec[0].iov_len = size;
-	iov_iter_kvec(&call->iter, ITER_DEST, call->kvec, 1, size);
+	iov_iter_kvec(&call->iter, READ, call->kvec, 1, size);
 }
 
 static inline void afs_extract_to_tmp(struct afs_call *call)
@@ -1151,7 +1151,7 @@ static inline void afs_extract_to_tmp64(struct afs_call *call)
 
 static inline void afs_extract_discard(struct afs_call *call, size_t size)
 {
-	iov_iter_discard(&call->iter, ITER_DEST, size);
+	iov_iter_discard(&call->iter, READ, size);
 }
 
 static inline void afs_extract_to_buf(struct afs_call *call, size_t size)
