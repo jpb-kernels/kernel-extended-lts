@@ -18,17 +18,6 @@
 #include "i915_gem_object.h"
 #include "i915_scatterlist.h"
 
-/* Abuse scatterlist to store pointer instead of struct page. */
-static inline void __set_phys_vaddr(struct scatterlist *sg, void *vaddr)
-{
-	sg_assign_page(sg, (struct page *)vaddr);
-}
-
-static inline void *__get_phys_vaddr(struct scatterlist *sg)
-{
-	return (void *)sg_page(sg);
-}
-
 static int i915_gem_object_get_pages_phys(struct drm_i915_gem_object *obj)
 {
 	struct address_space *mapping = obj->base.filp->f_mapping;
@@ -64,7 +53,7 @@ static int i915_gem_object_get_pages_phys(struct drm_i915_gem_object *obj)
 	sg->offset = 0;
 	sg->length = obj->base.size;
 
-	__set_phys_vaddr(sg, vaddr);
+	sg_assign_page(sg, (struct page *)vaddr);
 	sg_dma_address(sg) = dma;
 	sg_dma_len(sg) = obj->base.size;
 
@@ -106,7 +95,7 @@ i915_gem_object_put_pages_phys(struct drm_i915_gem_object *obj,
 			       struct sg_table *pages)
 {
 	dma_addr_t dma = sg_dma_address(pages->sgl);
-	void *vaddr = __get_phys_vaddr(pages->sgl);
+	void *vaddr = sg_page(pages->sgl);
 
 	__i915_gem_object_release_shmem(obj, pages, false);
 
@@ -144,58 +133,6 @@ i915_gem_object_put_pages_phys(struct drm_i915_gem_object *obj,
 	dma_free_coherent(&obj->base.dev->pdev->dev,
 			  roundup_pow_of_two(obj->base.size),
 			  vaddr, dma);
-}
-
-static int
-phys_pwrite(struct drm_i915_gem_object *obj,
-	    const struct drm_i915_gem_pwrite *args)
-{
-	void *vaddr = __get_phys_vaddr(obj->mm.pages->sgl) + args->offset;
-	char __user *user_data = u64_to_user_ptr(args->data_ptr);
-	int err;
-
-	err = i915_gem_object_wait(obj,
-				   I915_WAIT_INTERRUPTIBLE |
-				   I915_WAIT_ALL,
-				   MAX_SCHEDULE_TIMEOUT);
-	if (err)
-		return err;
-
-	/*
-	 * We manually control the domain here and pretend that it
-	 * remains coherent i.e. in the GTT domain, like shmem_pwrite.
-	 */
-	i915_gem_object_invalidate_frontbuffer(obj, ORIGIN_CPU);
-
-	if (copy_from_user(vaddr, user_data, args->size))
-		return -EFAULT;
-
-	drm_clflush_virt_range(vaddr, args->size);
-	intel_gt_chipset_flush(&to_i915(obj->base.dev)->gt);
-
-	i915_gem_object_flush_frontbuffer(obj, ORIGIN_CPU);
-	return 0;
-}
-
-static int
-phys_pread(struct drm_i915_gem_object *obj,
-	   const struct drm_i915_gem_pread *args)
-{
-	void *vaddr = __get_phys_vaddr(obj->mm.pages->sgl) + args->offset;
-	char __user *user_data = u64_to_user_ptr(args->data_ptr);
-	int err;
-
-	err = i915_gem_object_wait(obj,
-				   I915_WAIT_INTERRUPTIBLE,
-				   MAX_SCHEDULE_TIMEOUT);
-	if (err)
-		return err;
-
-	drm_clflush_virt_range(vaddr, args->size);
-	if (copy_to_user(user_data, vaddr, args->size))
-		return -EFAULT;
-
-	return 0;
 }
 
 static void phys_release(struct drm_i915_gem_object *obj)
