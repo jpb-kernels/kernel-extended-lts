@@ -3713,8 +3713,6 @@ static void rb_iter_reset(struct ring_buffer_iter *iter)
 	/* Iterator usage is expected to have record disabled */
 	iter->head_page = cpu_buffer->reader_page;
 	iter->head = cpu_buffer->reader_page->read;
-	iter->next_event = iter->head;
-	iter->missed_events = 0;
 
 	iter->cache_reader_page = iter->head_page;
 	iter->cache_read = cpu_buffer->read;
@@ -4304,17 +4302,6 @@ ring_buffer_peek(struct ring_buffer *buffer, int cpu, u64 *ts,
 	return event;
 }
 
-/** ring_buffer_iter_dropped - report if there are dropped events
- * @iter: The ring buffer iterator
- *
- * Returns true if there was dropped events since the last peek.
- */
-bool ring_buffer_iter_dropped(struct ring_buffer_iter *iter)
-{
-	return iter->missed_events != 0;
-}
-EXPORT_SYMBOL_GPL(ring_buffer_iter_dropped);
-
 /**
  * ring_buffer_iter_peek - peek at the next event to be read
  * @iter: The ring buffer iterator
@@ -4522,7 +4509,7 @@ void ring_buffer_iter_advance(struct ring_buffer_iter *iter)
 	unsigned long flags;
 
 	raw_spin_lock_irqsave(&cpu_buffer->reader_lock, flags);
-	iter->missed_events = 0;
+
 	rb_advance_iter(iter);
 
 	raw_spin_unlock_irqrestore(&cpu_buffer->reader_lock, flags);
