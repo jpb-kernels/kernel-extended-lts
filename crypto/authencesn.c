@@ -245,11 +245,9 @@ static int crypto_authenc_esn_decrypt_tail(struct aead_request *req,
 
 decrypt:
 
-	dst = scatterwalk_ffwd(areq_ctx->dst, dst, assoclen);
-	if (req->src == req->dst)
-		src = dst;
-	else
+	if (src != dst)
 		src = scatterwalk_ffwd(areq_ctx->src, src, assoclen);
+	dst = scatterwalk_ffwd(areq_ctx->dst, dst, assoclen);
 
 	skcipher_request_set_tfm(skreq, ctx->enc);
 	skcipher_request_set_callback(skreq, flags,
