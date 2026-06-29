@@ -5828,7 +5828,8 @@ static int nl80211_set_station(struct sk_buff *skb, struct genl_info *info)
 	err = rdev_change_station(rdev, dev, mac_addr, &params);
 
  out_put_vlan:
-	dev_put(params.vlan);
+	if (params.vlan)
+		dev_put(params.vlan);
 
 	return err;
 }
@@ -6056,7 +6057,8 @@ static int nl80211_new_station(struct sk_buff *skb, struct genl_info *info)
 
 	err = rdev_add_station(rdev, dev, mac_addr, &params);
 
-	dev_put(params.vlan);
+	if (params.vlan)
+		dev_put(params.vlan);
 	return err;
 }
 
@@ -7744,7 +7746,7 @@ static int nl80211_trigger_scan(struct sk_buff *skb, struct genl_info *info)
 
 	if (!err) {
 		nl80211_send_scan_start(rdev, wdev);
-
+		if (wdev->netdev)
 			dev_hold(wdev->netdev);
 	} else {
  out_free:
@@ -13885,7 +13887,9 @@ static int nl80211_pre_doit(const struct genl_ops *ops, struct sk_buff *skb,
 			return -ENETDOWN;
 		}
 
-		dev_hold(dev);
+		if (dev)
+			dev_hold(dev);
+
 		info->user_ptr[0] = rdev;
 	}
 
@@ -13899,7 +13903,8 @@ static void nl80211_post_doit(const struct genl_ops *ops, struct sk_buff *skb,
 		if (ops->internal_flags & NL80211_FLAG_NEED_WDEV) {
 			struct wireless_dev *wdev = info->user_ptr[1];
 
-			dev_put(wdev->netdev);
+			if (wdev->netdev)
+				dev_put(wdev->netdev);
 		} else {
 			dev_put(info->user_ptr[1]);
 		}

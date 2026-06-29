@@ -78,8 +78,10 @@ void nf_queue_entry_release_refs(struct nf_queue_entry *entry)
 	struct nf_hook_state *state = &entry->state;
 
 	/* Release those devices we held, or Alexey will kill me. */
-	dev_put(state->in);
-	dev_put(state->out);
+	if (state->in)
+		dev_put(state->in);
+	if (state->out)
+		dev_put(state->out);
 	if (state->sk)
 		nf_queue_sock_put(state->sk);
 
@@ -90,17 +92,7 @@ EXPORT_SYMBOL_GPL(nf_queue_entry_release_refs);
 static void nf_queue_entry_get_br_nf_refs(struct sk_buff *skb)
 {
 #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
-	dev_put(entry->physin);
-	dev_put(entry->physout);
-#endif
-}
-
-void nf_queue_entry_free(struct nf_queue_entry *entry)
-{
-	nf_queue_entry_release_refs(entry);
-	kfree(entry);
-}
-EXPORT_SYMBOL_GPL(nf_queue_entry_free);
+	struct nf_bridge_info *nf_bridge = nf_bridge_info_get(skb);
 
 	if (nf_bridge) {
 		struct net_device *physdev;
@@ -123,13 +115,12 @@ bool nf_queue_entry_get_refs(struct nf_queue_entry *entry)
 	if (state->sk && !refcount_inc_not_zero(&state->sk->sk_refcnt))
 		return false;
 
-	dev_hold(state->in);
-	dev_hold(state->out);
+	if (state->in)
+		dev_hold(state->in);
+	if (state->out)
+		dev_hold(state->out);
 
-#if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
-	dev_hold(entry->physin);
-	dev_hold(entry->physout);
-#endif
+	nf_queue_entry_get_br_nf_refs(entry->skb);
 	return true;
 }
 EXPORT_SYMBOL_GPL(nf_queue_entry_get_refs);

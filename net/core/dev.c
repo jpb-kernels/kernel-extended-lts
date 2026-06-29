@@ -706,7 +706,8 @@ struct net_device *dev_get_by_name(struct net *net, const char *name)
 
 	rcu_read_lock();
 	dev = dev_get_by_name_rcu(net, name);
-	dev_hold(dev);
+	if (dev)
+		dev_hold(dev);
 	rcu_read_unlock();
 	return dev;
 }
@@ -779,7 +780,8 @@ struct net_device *dev_get_by_index(struct net *net, int ifindex)
 
 	rcu_read_lock();
 	dev = dev_get_by_index_rcu(net, ifindex);
-	dev_hold(dev);
+	if (dev)
+		dev_hold(dev);
 	rcu_read_unlock();
 	return dev;
 }
